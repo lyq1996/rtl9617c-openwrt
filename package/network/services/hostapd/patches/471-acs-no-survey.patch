@@ -1,0 +1,24 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] hostapd: reach the BSS fallback when survey is unsupported
+
+Treat -EOPNOTSUPP from get_survey as non-fatal so drivers that support
+software scans but expose no survey callback, such as the RTL AX AP
+driver, can still run ACS through the existing BSS-based fallback.
+Other survey errors stay fatal.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+
+--- a/src/ap/acs.c
++++ b/src/ap/acs.c
+@@ -1367,7 +1367,10 @@ static void acs_scan_complete(struct hostapd_iface *iface)
+ 		   iface->conf->acs_num_scans);
+ 
+ 	err = hostapd_drv_get_survey(iface->bss[0], 0);
+-	if (err) {
++	if (err == -EOPNOTSUPP) {
++		wpa_printf(MSG_INFO,
++			   "ACS: Survey unavailable, using BSS-based fallback");
++	} else if (err) {
+ 		wpa_printf(MSG_ERROR, "ACS: Failed to get survey data");
+ 		goto fail;
+ 	}

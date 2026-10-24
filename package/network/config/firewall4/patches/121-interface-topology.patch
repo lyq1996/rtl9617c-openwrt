@@ -1,0 +1,19 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] firewall4: reparse flowtable devices on topology updates
+
+Handle the netifd IFUPDATE_TOPOLOGY event so bridge membership changes
+refresh hardware flow offload devices without a full firewall reload.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+
+--- a/root/etc/hotplug.d/iface/20-firewall
++++ b/root/etc/hotplug.d/iface/20-firewall
+@@ -7,7 +7,7 @@
+ }
+ 
+ [ "$ACTION" = ifup -o "$ACTION" = ifupdate ] || exit 0
+-[ "$ACTION" = ifupdate -a -z "$IFUPDATE_ADDRESSES" -a -z "$IFUPDATE_DATA" ] && exit 0
++[ "$ACTION" = ifupdate -a -z "$IFUPDATE_ADDRESSES" -a -z "$IFUPDATE_DATA" -a -z "$IFUPDATE_TOPOLOGY" ] && exit 0
+ 
+ /etc/init.d/firewall enabled || exit 0
+ 

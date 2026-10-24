@@ -95,7 +95,7 @@ function setup_phy(phy, config, data) {
 		rxantenna: config.rxantenna
 	});
 
-	if (config.txpower)
+	if (config.txpower != null)
 		config.txpower = 'fixed ' + config.txpower + '00';
 	else
 		config.txpower = 'auto';
@@ -106,12 +106,16 @@ function setup_phy(phy, config, data) {
 		system(`iw phy ${phy} set antenna ${config.txantenna} ${config.rxantenna} >/dev/null 2>&1`);
 	}
 	system(`iw phy ${phy} set distance ${config.distance} >/dev/null 2>&1`);
-	system(`iw phy ${phy} set txpower ${config.txpower}`);
+	if (system(`iw phy ${phy} set txpower ${config.txpower}`)) {
+		netifd.setup_failed('TXPOWER_FAILED');
+		return false;
+	}
 
 	if (config.frag)
 		system(`iw phy ${phy} set frag ${config.frag}`);
 	if (config.rts)
 		system(`iw phy ${phy} set rts ${config.rts}`);
+	return true;
 }
 
 function iw_htmode(config) {
@@ -206,7 +210,8 @@ function setup() {
 	delete config.hwmode;
 
 	validate('device', config);
-	setup_phy(data.phy, data.config, data.data);
+	if (!setup_phy(data.phy, data.config, data.data))
+		return 1;
 
 	let supplicant_mesh;
 	let has_ap = false;

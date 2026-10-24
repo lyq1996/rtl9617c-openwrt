@@ -1,0 +1,24 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] iwinfo: return an error when txpower is unknown
+
+Signal failure instead of reporting 0 dBm when nl80211 has no txpower
+information, so LuCI can show an unknown state rather than a wrong
+value.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+
+--- a/iwinfo_nl80211.c
++++ b/iwinfo_nl80211.c
+@@ -1650,10 +1650,10 @@
+ 	char *res;
+ 
+ 	res = nl80211_phy2ifname(ifname);
+-	*buf = 0;
++	*buf = INT_MIN;
+ 
+ 	if (nl80211_request(res ? res : ifname, NL80211_CMD_GET_INTERFACE, 0,
+-	                    nl80211_get_txpower_cb, buf))
++	                    nl80211_get_txpower_cb, buf) || *buf == INT_MIN)
+ 		return -1;
+ 
+ 	return 0;
