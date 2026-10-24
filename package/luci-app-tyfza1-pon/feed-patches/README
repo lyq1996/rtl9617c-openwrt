@@ -1,0 +1,15 @@
+TYFZA1 LuCI feed patches
+========================
+
+These patches modify the LuCI feed (not this package). Apply them after
+"scripts/feeds update luci" and before building:
+
+  for p in package/luci-app-tyfza1-pon/feed-patches/*.patch; do
+      git -C feeds/luci apply "$p"
+  done
+
+- 100-tyfza1-system-status: surface the luci.tyfza1-system hardware RPC
+  (served by this package) on the system status page.
+- 101-tyfza1-resource-version: cache-bust LuCI static resources.
+- 110-tyfza1-txpower-label: label the current txpower limit on the
+  wireless page.
