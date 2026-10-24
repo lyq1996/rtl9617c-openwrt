@@ -35,3 +35,15 @@ git-src
 .cproject
 .ccache
 .vscode*
+target/linux/rtl9617c/files-6.18/drivers/net/wireless/realtek/rtl_ax_ap/pe-tx-code.h
+__pycache__/
+*.pyc
+<<<<<<< HEAD
+target/linux/rtl9617c/pe/build/
+=======
+>>>>>>> a8e5ebcacd (rtl9617c: describe the kernel patches)
+# TYFZA1 build-time artifacts.
+tyfza1-fit-tools/
+target/linux/rtl9617c/files-6.18/drivers/net/wireless/realtek/rtl_ax_ap/pe-tx-code.h
+target/linux/rtl9617c/pe/build/
+/package/luci-theme-argon
