@@ -76,4 +76,26 @@ define Device/tianyi_tyfza1
 endef
 TARGET_DEVICES += tianyi_tyfza1
 
+# PT1500-H10 bring-up: initramfs-first. The OEM bootloader keeps the kernel
+# and DTB in separate UBI volumes without a FIT, so production images wait
+# until the boot flow is settled on hardware; only the raw initramfs kernel
+# and the board DTB are produced.
+define Device/youhua_pt1500_h10
+  DEVICE_VENDOR := Youhua
+  DEVICE_MODEL := PT1500-H10
+  DEVICE_DTS := rtl9617c-pt1500-h10
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-usb3 block-mount
+  KERNEL := kernel-bin
+  KERNEL_INITRAMFS := kernel-bin
+  KERNEL_INITRAMFS_SUFFIX := -initramfs-Image
+  KERNEL_INSTALL := 1
+  FILESYSTEMS := squashfs
+  IMAGES :=
+  ARTIFACTS := board.dtb
+  ARTIFACT/board.dtb := tyfza1-dtb rtl9617c-pt1500-h10
+endef
+TARGET_DEVICES += youhua_pt1500_h10
+
 $(eval $(call BuildImage))
+
