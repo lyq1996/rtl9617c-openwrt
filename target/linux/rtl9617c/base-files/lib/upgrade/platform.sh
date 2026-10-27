@@ -4,6 +4,16 @@ REQUIRE_IMAGE_METADATA=1
 RAMFS_COPY_BIN='fw_printenv fw_setenv fwtool jsonfilter'
 RAMFS_COPY_DATA='/etc/fw_env.config'
 CI_UBIPART=ubi_device
+
+# PT1500-H10 keeps the system image in fip and the overlay in rootfs_data;
+# its upgrade never touches the OEM ubi_Config volume.
+case "$(board_name)" in
+youhua,pt1500-h10)
+	. /lib/upgrade/pt1500-fip.sh
+	return 0 2>/dev/null
+	;;
+esac
+
 . /lib/upgrade/tyfza1-storage.sh
 
 tyfza1_volume_fits() {

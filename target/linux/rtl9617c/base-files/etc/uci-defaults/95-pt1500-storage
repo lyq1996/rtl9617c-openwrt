@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# PT1500-H10: only fip (the FIT) and rootfs_data (this overlay) belong to
+# OpenWrt. block-mount's anon_mount would also mount the OEM ubi_Config UBIFS
+# read-write and replay its journal, so keep it off even on an older overlay
+# that still carries anon_mount=1.
+
+case "$(board_name)" in
+youhua,pt1500-h10) ;;
+*) exit 0 ;;
+esac
+
+[ "$(uci -q get fstab.@global[0].anon_mount)" = 0 ] && exit 0
+
+uci set fstab.@global[0].anon_mount='0'
+uci commit fstab
+exit 0

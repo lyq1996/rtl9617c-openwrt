@@ -1,6 +1,9 @@
 config global
 	option anon_swap '0'
-	option anon_mount '1'
+	# Never auto-mount unknown volumes: on PT1500 that would mount the OEM
+	# ubi_Config UBIFS read-write and replay its journal, and on TYFZA1 the
+	# factory volume is read only on purpose by /etc/init.d/tyfza1-factory.
+	option anon_mount '0'
 	option auto_swap '0'
 	option auto_mount '1'
 	option delay_root '5'

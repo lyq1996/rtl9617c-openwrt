@@ -16,6 +16,7 @@
 #include <linux/of_mdio.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 
 #define MDIO_CFG	0x00
 #define MDIO_MANUAL	BIT(0)
@@ -40,11 +41,14 @@ struct rtl9617c_mdio {
 	void __iomem *ocp;
 	void __iomem *wrap;
 	u16 page[4];
+	/* Board MDIO pins carry external PHYs only: never route an address to
+	 * the internal GPHY OCP window, even for the 1..4 it normally owns. */
+	bool external_phys;
 };
 
-static bool rtl_mdio_internal(int phy)
+static bool rtl_mdio_internal(struct rtl9617c_mdio *mdio, int phy)
 {
-	return phy >= 1 && phy <= 4;
+	return !mdio->external_phys && phy >= 1 && phy <= 4;
 }
 
 static u32 rtl_mdio_ocp_offset(struct rtl9617c_mdio *mdio, int phy, int reg)
@@ -86,7 +90,7 @@ static int rtl_mdio_read(struct mii_bus *bus, int phy, int reg)
 
 	if (phy < 0 || phy > 31 || reg < 0 || reg > 31)
 		return -EINVAL;
-	if (rtl_mdio_internal(phy)) {
+	if (rtl_mdio_internal(mdio, phy)) {
 		if (reg == 31)
 			return mdio->page[phy - 1];
 		return readl(mdio->ocp + rtl_mdio_ocp_offset(mdio, phy, reg)) & 0xffff;
@@ -101,7 +105,7 @@ static int rtl_mdio_write(struct mii_bus *bus, int phy, int reg, u16 value)
 
 	if (phy < 0 || phy > 31 || reg < 0 || reg > 31)
 		return -EINVAL;
-	if (rtl_mdio_internal(phy)) {
+	if (rtl_mdio_internal(mdio, phy)) {
 		if (reg == 31)
 			mdio->page[phy - 1] = value;
 		else
@@ -123,7 +127,7 @@ static int rtl_mdio_c45(struct mii_bus *bus, int phy, int devad, int reg,
 
 	if (phy < 0 || phy > 31 || devad < 0 || devad > 31 || reg < 0 || reg > 0xffff)
 		return -EINVAL;
-	if (rtl_mdio_internal(phy))
+	if (rtl_mdio_internal(mdio, phy))
 		return -EOPNOTSUPP;
 	address = FIELD_PREP(MDIO_PHY, phy) | FIELD_PREP(MDIO_REG, devad) | MDIO_C45;
 	/* mii_bus core serializes both phases under its mdio_lock. */
@@ -180,6 +184,7 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	mdio->wrap = devm_platform_ioremap_resource(pdev, 2);
 	if (IS_ERR(mdio->wrap))
 		return PTR_ERR(mdio->wrap);
+	mdio->external_phys = device_property_read_bool(dev, "realtek,external-phys");
 	/* Preserve bootloader MDC prescaler, PHY patch/calibration and pinmux. */
 	writel(readl(mdio->per + MDIO_CFG) | MDIO_MANUAL, mdio->per + MDIO_CFG);
 	writel(readl(mdio->wrap + GPHY_CTRL12) | GPHY_OCP_TIMEOUT,
@@ -195,6 +200,8 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	bus->read_c45 = rtl_mdio_read_c45;
 	bus->write_c45 = rtl_mdio_write_c45;
 	snprintf(bus->id, MII_BUS_ID_SIZE, "%s", dev_name(dev));
+	dev_info(dev, "MDIO bus ready, PHY 1-4 on %s\n",
+		 mdio->external_phys ? "C22" : "internal OCP");
 	return devm_of_mdiobus_register(dev, bus, dev->of_node);
 }
 

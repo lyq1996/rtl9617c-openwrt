@@ -881,6 +881,7 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	struct net_device *dev = NULL;
 	struct rtl_lan *lan;
 	bool sgmii_powered = false, registration_locked = false;
+	unsigned int index;
 	u8 mac[ETH_ALEN];
 	int ret;
 
@@ -905,7 +906,12 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	}
 	priv->ports[port] = dev;
 	SET_NETDEV_DEV(dev, parent);
-	snprintf(dev->name, sizeof(dev->name), "lan%u", port == 4 ? 4 : port + 1);
+	/* Port 4 is the SGMII lane. It is lan4 while port 3 stays unwired (the
+	 * TYFZA1 2.5G tower) and lan5 on a board that also wires port 3. */
+	index = port == 4 ? 4 : port + 1;
+	if (port == 4 && priv->ports[3])
+		index = 5;
+	snprintf(dev->name, sizeof(dev->name), "lan%u", index);
 	lan = netdev_priv(dev);
 	lan->shared = priv;
 	lan->port = port;
@@ -994,8 +1000,13 @@ static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 		phy = of_parse_phandle(parent->of_node,
 			port == priv->port ? "phy-handle" : "realtek,lan-phys",
 			port == priv->port ? 0 : port);
-		if (!phy)
+		if (!phy) {
+			/* A port without a PHY is not registered; say so instead
+			 * of leaving ip link without any hint of the cause. */
+			dev_warn(parent, "LAN port %u has no %s; not registered\n", port,
+				 port == priv->port ? "phy-handle" : "realtek,lan-phys");
 			continue;
+		}
 		if (port == 4) {
 			/* Like the OEM rtk_rtl8221b_device_init_thread, set up
 			 * the external RTL8221B off the boot path: its HiSGMII
@@ -1385,7 +1396,11 @@ static void rtl_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id rtl_match[] = {
-	{ .compatible = "realtek,rtl9617c-xram-eth" }, { }
+	{ .compatible = "realtek,rtl9617c-xram-eth" },
+	/* Board trees name the same engine after the block ("ni"); the PON
+	 * driver resolves this node as its realtek,network-engine. */
+	{ .compatible = "realtek,rtl9617c-ni" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rtl_match);
 

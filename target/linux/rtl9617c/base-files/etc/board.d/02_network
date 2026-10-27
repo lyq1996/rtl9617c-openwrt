@@ -3,11 +3,34 @@
 . /lib/functions/uci-defaults.sh
 
 board_config_update
-lan_ports="lan1 lan2 lan3 lan4"
-ucidef_set_interfaces_lan_wan "$lan_ports" "pon0"
-if [ -f /tmp/tyfza1-factory/lan_mac ]; then
-	read -r address < /tmp/tyfza1-factory/lan_mac
-	ucidef_set_interface_macaddr lan "$address"
-	ucidef_set_label_macaddr "$address"
-fi
+
+case "$(board_name)" in
+youhua,pt1500-h10)
+	# No switch: every jack is its own NI MAC port with its own PHY, and
+	# the NIC registers one netdev per port (lan1..lan4 = NI port 0..3 on
+	# the four RTL8211 GE PHYs, lan5 = NI port 4 on the RTL8221B 2.5G PHY
+	# behind the SGMII lane).
+	#
+	# The OEM names the same ports eth0.2..eth0.5 and remaps them with
+	# /proc/realtek/uni_capability "REMAP 4;1;2;3", so the silkscreen is
+	# LAN1 = NI port 4 (the 2.5G jack, lan5), LAN2..LAN4 = NI ports 1..3
+	# (lan2..lan4). NI port 0 keeps a netdev but is not wired to a jack;
+	# leave it in the bridge so an unknown jack is never left dead.
+	#
+	# WAN is not configured here: the PON netdev (pon0) does not exist
+	# yet, and uci-defaults/90-tyfza1-pon-wan binds wan to pon0 as soon
+	# as the PON driver exposes it.
+	ucidef_set_interface_lan "lan5 lan2 lan3 lan4 lan1"
+	;;
+*)
+	lan_ports="lan1 lan2 lan3 lan4"
+	ucidef_set_interfaces_lan_wan "$lan_ports" "pon0"
+	if [ -f /tmp/tyfza1-factory/lan_mac ]; then
+		read -r address < /tmp/tyfza1-factory/lan_mac
+		ucidef_set_interface_macaddr lan "$address"
+		ucidef_set_label_macaddr "$address"
+	fi
+	;;
+esac
+
 board_config_flush

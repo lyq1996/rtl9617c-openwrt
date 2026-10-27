@@ -85,16 +85,21 @@ define Device/tianyi_tyfza1
 endef
 # TARGET_DEVICES += tianyi_tyfza1  # TYFZA1 needs external fit tools; PT1500-only build
 
-# PT1500-H10 bring-up: initramfs-first. The OEM bootloader keeps the kernel
-# and DTB in separate UBI volumes without a FIT, so production images wait
-# until the boot flow is settled on hardware; only the raw initramfs kernel
-# and the board DTB are produced.
+# PT1500-H10: the system image is one FIT (kernel + DTB + initramfs root) in
+# the fip UBI volume, booted by U-Boot with configuration 9617c. Persistence
+# comes from the rootfs_data UBIFS volume (package pt1500-storage), so the
+# root filesystem is the initramfs and no squashfs volume is needed.
 define Device/youhua_pt1500_h10
   DEVICE_VENDOR := Youhua
   DEVICE_MODEL := PT1500-H10
   DEVICE_DTS := rtl9617c-pt1500-h10
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-usb3 block-mount
+  # luci-proto-ppp carries both PPP and PPPoE in this feed; an IPv4 static or
+  # DHCP protocol needs no extra package on top of luci-mod-network.
+  DEVICE_PACKAGES := kmod-usb3 block-mount pt1500-storage \
+	kmod-gpio-button-hotplug \
+	luci luci-ssl luci-proto-ppp \
+	uhttpd uhttpd-mod-ubus luci-app-firewall firewall4 dnsmasq
   KERNEL := kernel-bin
   KERNEL_INITRAMFS := kernel-bin
   KERNEL_INITRAMFS_SUFFIX := -initramfs-Image

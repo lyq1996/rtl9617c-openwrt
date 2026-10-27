@@ -1,0 +1,134 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Youhua PT1500-H10 storage layout on the single UBI device:
+#
+#   ubi_Config    OEM calibration; never created, never modified
+#   fip           uImage.FIT (kernel + DTB + initramfs root); read by U-Boot
+#   rootfs_data   UBIFS; the only writable volume, mounted as /overlay
+#
+# The image boots from the FIT as an initramfs, so / is a RAM copy and OpenWrt
+# deliberately skips mount_root (INITRAMFS=1). Without an overlay every change
+# would be lost on reboot, so this hook creates rootfs_data on first boot and
+# runs mount_root itself. It runs before config_generate, so the generated
+# /etc/board.json and /etc/config/network land in the overlay.
+
+PT1500_FIP_EBS=224		# 27.8 MiB of FIT volume at a 126976-byte LEB
+PT1500_FIP_SLACK=16		# spare LEBs the FIT volume keeps over the image
+PT1500_DATA_MAX_EBS=1024	# cap the overlay, keep room to grow fip later
+PT1500_UBIFS_MAGIC=31181006	# 0x06101831, little endian
+
+pt1500_log() {
+	echo "pt1500-storage: $*"
+}
+
+pt1500_volume() {
+	local path
+
+	for path in /sys/class/ubi/ubi0_*/name; do
+		[ -f "$path" ] || continue
+		[ "$(cat "$path")" = "$1" ] || continue
+		echo "${path%/name}"
+		return 0
+	done
+
+	return 1
+}
+
+# This kernel has no devtmpfs, so preinit cannot rely on udev or hotplug having
+# created the UBI nodes yet.
+pt1500_node() {
+	local class="$1" node="$2" dev
+
+	[ -e "$node" ] && return 0
+	dev=$(cat "/sys/class/ubi/$class/dev" 2>/dev/null) || return 1
+	mknod "$node" c "${dev%%:*}" "${dev##*:}"
+}
+
+pt1500_seed_data() {
+	local data="$1"
+
+	[ -f /usr/share/pt1500/overlay-seed.ubifs.gz ] || return 1
+	gunzip -c /usr/share/pt1500/overlay-seed.ubifs.gz > /tmp/.ubifs-seed &&
+		ubiupdatevol "/dev/$data" /tmp/.ubifs-seed
+	local ret=$?
+	rm -f /tmp/.ubifs-seed
+
+	return $ret
+}
+
+pt1500_storage_setup() {
+	local fip data leb avail magic ebs header fit_bytes target
+
+	[ -d /sys/class/ubi/ubi0 ] || return 0
+	grep -qa youhua,pt1500-h10 /proc/device-tree/compatible || return 0
+	pt1500_node ubi0 /dev/ubi0 || {
+		pt1500_log "no UBI control node"
+		return 0
+	}
+
+	fip=$(pt1500_volume fip)
+	if [ -z "$fip" ]; then
+		pt1500_log "no fip volume; install a system from U-Boot first"
+		return 0
+	fi
+	pt1500_node "$fip" "/dev/$fip" || {
+		pt1500_log "no node for $fip"
+		return 0
+	}
+	leb=$(cat "/sys/class/ubi/$fip/usable_eb_size")
+	ebs=$(cat "/sys/class/ubi/$fip/reserved_ebs")
+
+	# A U-Boot recovery rebuild gives fip every free eraseblock. Hand the
+	# overlay its space back, but never below the FIT that just booted: the
+	# size in the FDT header is the only reliable data length on a dynamic
+	# volume. Booting an image larger than the cap simply raises it.
+	header=$(dd if="/dev/$fip" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	fit_hex=${header#????????}
+	target=$PT1500_FIP_EBS
+	case "$fit_hex" in
+	''|*[!0-9a-f]*) ;;
+	*)
+		fit_bytes=$((0x$fit_hex))
+		fit_bytes=$(( (fit_bytes + leb - 1) / leb + PT1500_FIP_SLACK ))
+		[ "$fit_bytes" -gt "$target" ] && target=$fit_bytes
+		;;
+	esac
+	if [ "$ebs" -gt "$target" ]; then
+		pt1500_log "shrinking fip from $ebs to $target LEBs"
+		ubirsvol /dev/ubi0 -N fip -s "$((target * leb))" ||
+			pt1500_log "fip resize failed, keeping $ebs LEBs"
+	fi
+
+	data=$(pt1500_volume rootfs_data) || data=
+	if [ -z "$data" ]; then
+		avail=$(cat /sys/class/ubi/ubi0/avail_eraseblocks)
+		[ "$avail" -gt "$PT1500_DATA_MAX_EBS" ] && avail=$PT1500_DATA_MAX_EBS
+		if [ "$avail" -le 0 ]; then
+			pt1500_log "no free eraseblocks for rootfs_data"
+			return 0
+		fi
+		pt1500_log "creating rootfs_data with $avail LEBs"
+		ubimkvol /dev/ubi0 -N rootfs_data -s "$((avail * leb))" || return 0
+		data=$(pt1500_volume rootfs_data) || return 0
+	fi
+	pt1500_node "$data" "/dev/$data" || {
+		pt1500_log "no node for $data"
+		return 0
+	}
+
+	# A first boot interrupted between ubimkvol and the seed write leaves a
+	# volume without a UBIFS superblock; rewrite the seed rather than drop to
+	# a RAM overlay for good.
+	magic=$(dd if="/dev/$data" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	if [ "$magic" != "$PT1500_UBIFS_MAGIC" ]; then
+		pt1500_log "writing UBIFS seed to $data"
+		pt1500_seed_data "$data" || pt1500_log "seed write failed"
+	fi
+
+	grep -q " /overlay " /proc/mounts && return 0
+	pt1500_log "mounting $data as /overlay"
+	/sbin/mount_root start
+}
+
+boot_hook_add initramfs pt1500_storage_setup
