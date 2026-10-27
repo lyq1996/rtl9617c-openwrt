@@ -12,14 +12,17 @@
 #include <linux/gpio/consumer.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mii.h>
 #include <linux/module.h>
 #include <linux/of_mdio.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 
+/* MDC prescaler word. The bootloader value is left untouched: U-Boot on this
+ * board never programs it and its internal-PHY reads work regardless, and the
+ * value is printed by rtl_mdio_detect() so a wrong divider is visible. */
 #define MDIO_CFG	0x00
-#define MDIO_MANUAL	BIT(0)
 #define MDIO_ADDR	0x04
 #define MDIO_PHY	GENMASK(4, 0)
 #define MDIO_REG	GENMASK(12, 8)
@@ -31,35 +34,35 @@
 #define MDIO_CTRL	0x10
 #define MDIO_DONE	BIT(0)
 #define MDIO_START	BIT(7)
+/* GPHY wrapper register block (reg "gphy-wrap"); read only for the log. */
 #define GPHY_CTRL12	0x30
 #define GPHY_CTRL13	0x34
-#define GPHY_OCP_TIMEOUT GENMASK(31, 24)
-#define GPHY_OCP_SELECT	BIT(0)
 
 struct rtl9617c_mdio {
 	void __iomem *per;
 	void __iomem *ocp;
 	void __iomem *wrap;
-	u16 page[4];
-	/* Board MDIO pins carry external PHYs only: never route an address to
-	 * the internal GPHY OCP window, even for the 1..4 it normally owns. */
-	bool external_phys;
+	/* Addresses served by the internal GPHY register window. */
+	u32 ocp_mask;
+	/* realtek,external-phys: when both paths answer, prefer the pins. */
+	bool prefer_c22;
 };
 
 static bool rtl_mdio_internal(struct rtl9617c_mdio *mdio, int phy)
 {
-	return !mdio->external_phys && phy >= 1 && phy <= 4;
+	return mdio->ocp_mask & BIT(phy);
 }
 
-static u32 rtl_mdio_ocp_offset(struct rtl9617c_mdio *mdio, int phy, int reg)
+/*
+ * Internal GPHY register window. Taurus maps it linearly: the NI_MDIO_OPER
+ * word is reg_base<<12 | phy_addr<<7 | reg_off<<2 with reg_base 0xf4600 for
+ * this SoC (taurus_ni.h), so with the window ioremapped the byte offset is
+ * just phy*128 + reg*4. Verified against U-Boot's taurus_ni.c, which reads
+ * 0x001ccac4 from PHY 1..4 on this board.
+ */
+static u32 rtl_mdio_ocp_offset(int phy, int reg)
 {
-	u32 address;
-
-	if (reg >= 16 && reg < 24)
-		address = ((mdio->page[phy - 1] & 0xfff) << 4) + ((reg - 16) << 1);
-	else
-		address = 0xa400 + (reg << 1);
-	return ((phy - 1) << 18) | ((address & 0xffff) << 2);
+	return (phy << 7) | (reg << 2);
 }
 
 static int rtl_mdio_xfer(struct rtl9617c_mdio *mdio, u32 address, u16 value,
@@ -84,19 +87,50 @@ static int rtl_mdio_xfer(struct rtl9617c_mdio *mdio, u32 address, u16 value,
 	return value;
 }
 
+static int rtl_mdio_c22(struct rtl9617c_mdio *mdio, int phy, int reg, u16 value,
+			bool read)
+{
+	/* Clause 22 leaves the operation field at zero; only the direction bit
+	 * and the START strobe matter (U-Boot __ca_mdio_c22_read/write). */
+	return rtl_mdio_xfer(mdio, FIELD_PREP(MDIO_PHY, phy) |
+		FIELD_PREP(MDIO_REG, reg) | (read ? MDIO_READ : 0), value, read);
+}
+
+/* A real part never reports an all-zero or all-one identifier half; a dead
+ * bus reads back as either. */
+static bool rtl_mdio_id_valid(u32 id)
+{
+	u32 id1 = id >> 16;
+
+	return id1 != 0 && id1 != 0xffff;
+}
+
+static u32 rtl_mdio_c22_id(struct rtl9617c_mdio *mdio, int phy, int *err)
+{
+	int hi = rtl_mdio_c22(mdio, phy, MII_PHYSID1, 0, true);
+	int lo = rtl_mdio_c22(mdio, phy, MII_PHYSID2, 0, true);
+
+	*err = hi < 0 ? hi : lo < 0 ? lo : 0;
+	return (hi < 0 || lo < 0) ? 0 : ((u32)hi << 16) | lo;
+}
+
+static u32 rtl_mdio_ocp_id(struct rtl9617c_mdio *mdio, int phy)
+{
+	u32 hi = readl(mdio->ocp + rtl_mdio_ocp_offset(phy, MII_PHYSID1));
+	u32 lo = readl(mdio->ocp + rtl_mdio_ocp_offset(phy, MII_PHYSID2));
+
+	return ((hi & 0xffff) << 16) | (lo & 0xffff);
+}
+
 static int rtl_mdio_read(struct mii_bus *bus, int phy, int reg)
 {
 	struct rtl9617c_mdio *mdio = bus->priv;
 
 	if (phy < 0 || phy > 31 || reg < 0 || reg > 31)
 		return -EINVAL;
-	if (rtl_mdio_internal(mdio, phy)) {
-		if (reg == 31)
-			return mdio->page[phy - 1];
-		return readl(mdio->ocp + rtl_mdio_ocp_offset(mdio, phy, reg)) & 0xffff;
-	}
-	return rtl_mdio_xfer(mdio, FIELD_PREP(MDIO_PHY, phy) |
-		FIELD_PREP(MDIO_REG, reg) | FIELD_PREP(MDIO_OP, 3) | MDIO_READ, 0, true);
+	if (rtl_mdio_internal(mdio, phy))
+		return readl(mdio->ocp + rtl_mdio_ocp_offset(phy, reg)) & 0xffff;
+	return rtl_mdio_c22(mdio, phy, reg, 0, true);
 }
 
 static int rtl_mdio_write(struct mii_bus *bus, int phy, int reg, u16 value)
@@ -106,22 +140,17 @@ static int rtl_mdio_write(struct mii_bus *bus, int phy, int reg, u16 value)
 	if (phy < 0 || phy > 31 || reg < 0 || reg > 31)
 		return -EINVAL;
 	if (rtl_mdio_internal(mdio, phy)) {
-		if (reg == 31)
-			mdio->page[phy - 1] = value;
-		else
-			writel(value, mdio->ocp + rtl_mdio_ocp_offset(mdio, phy, reg));
+		writel(value, mdio->ocp + rtl_mdio_ocp_offset(phy, reg));
 		/* Keep the documented Taurus OCP write settling interval. */
 		usleep_range(1000, 2000);
 		return 0;
 	}
-	return rtl_mdio_xfer(mdio, FIELD_PREP(MDIO_PHY, phy) |
-		FIELD_PREP(MDIO_REG, reg) | FIELD_PREP(MDIO_OP, 1), value, false);
+	return rtl_mdio_c22(mdio, phy, reg, value, false);
 }
 
-static int rtl_mdio_c45(struct mii_bus *bus, int phy, int devad, int reg,
-			 u16 value, bool read)
+static int rtl_mdio_c45_xfer(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
+			     u16 value, bool read)
 {
-	struct rtl9617c_mdio *mdio = bus->priv;
 	u32 address;
 	int ret;
 
@@ -140,12 +169,58 @@ static int rtl_mdio_c45(struct mii_bus *bus, int phy, int devad, int reg,
 
 static int rtl_mdio_read_c45(struct mii_bus *bus, int phy, int devad, int reg)
 {
-	return rtl_mdio_c45(bus, phy, devad, reg, 0, true);
+	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, 0, true);
 }
 
 static int rtl_mdio_write_c45(struct mii_bus *bus, int phy, int devad, int reg, u16 value)
 {
-	return rtl_mdio_c45(bus, phy, devad, reg, value, false);
+	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, value, false);
+}
+
+/*
+ * Address 1..4 belong to the internal GPHYs on this SoC (U-Boot reads
+ * 0x001ccac4 from all four through the register window), and everything from 5
+ * up is an external part on the MDIO pins. The identifier read decides anyway:
+ * a board that wires external PHYs at 1..4 would answer on the pins instead.
+ */
+static void rtl_mdio_detect(struct device *dev, struct rtl9617c_mdio *mdio)
+{
+	bool use_c22, use_ocp;
+	int phy, err, id1, id2;
+	u32 c22, ocp;
+
+	dev_info(dev, "MDIO_CFG=%08x GPHY_CTRL12=%08x GPHY_CTRL13=%08x\n",
+		 readl(mdio->per + MDIO_CFG), readl(mdio->wrap + GPHY_CTRL12),
+		 readl(mdio->wrap + GPHY_CTRL13));
+
+	for (phy = 1; phy <= 4; phy++) {
+		ocp = rtl_mdio_ocp_id(mdio, phy);
+		use_ocp = rtl_mdio_id_valid(ocp) && !mdio->prefer_c22;
+		use_c22 = false;
+		if (!use_ocp) {
+			c22 = rtl_mdio_c22_id(mdio, phy, &err);
+			use_c22 = !err && rtl_mdio_id_valid(c22);
+		} else {
+			c22 = 0;
+			err = 0;
+		}
+		if (use_ocp)
+			mdio->ocp_mask |= BIT(phy);
+		dev_info(dev, "phy%d: window=%08x%s%08x -> %s\n", phy, ocp,
+			 use_c22 ? " pins=" : "", c22,
+			 use_ocp ? "internal GPHY" : use_c22 ? "MDIO pins" : "absent");
+	}
+
+	for (phy = 5; phy <= 31; phy++) {
+		c22 = rtl_mdio_c22_id(mdio, phy, &err);
+		if (err || !rtl_mdio_id_valid(c22))
+			continue;
+		dev_info(dev, "phy%d: C22=%08x on the MDIO pins\n", phy, c22);
+	}
+
+	id1 = rtl_mdio_c45_xfer(mdio, 7, MDIO_MMD_PMAPMD, MII_PHYSID1, 0, true);
+	id2 = rtl_mdio_c45_xfer(mdio, 7, MDIO_MMD_PMAPMD, MII_PHYSID2, 0, true);
+	dev_info(dev, "phy7: C45 PMAPMD id1=%d id2=%d\n", id1, id2);
 }
 
 static int rtl_mdio_reset(struct mii_bus *bus)
@@ -184,14 +259,13 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	mdio->wrap = devm_platform_ioremap_resource(pdev, 2);
 	if (IS_ERR(mdio->wrap))
 		return PTR_ERR(mdio->wrap);
-	mdio->external_phys = device_property_read_bool(dev, "realtek,external-phys");
-	/* Preserve bootloader MDC prescaler, PHY patch/calibration and pinmux. */
-	writel(readl(mdio->per + MDIO_CFG) | MDIO_MANUAL, mdio->per + MDIO_CFG);
-	writel(readl(mdio->wrap + GPHY_CTRL12) | GPHY_OCP_TIMEOUT,
-	       mdio->wrap + GPHY_CTRL12);
-	writel(readl(mdio->wrap + GPHY_CTRL13) | GPHY_OCP_SELECT,
-	       mdio->wrap + GPHY_CTRL13);
-	usleep_range(1000, 2000);
+	mdio->prefer_c22 = device_property_read_bool(dev, "realtek,external-phys");
+	/*
+	 * The bootloader leaves MDIO_CFG (MDC prescaler) and the GPHY wrapper at
+	 * values that work: U-Boot on this board reads all four internal PHYs
+	 * without touching either, so neither is programmed here. The detect
+	 * step prints both for the record.
+	 */
 	bus->name = "RTL9617C MDIO/OCP";
 	bus->parent = dev;
 	bus->reset = rtl_mdio_reset;
@@ -200,8 +274,9 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	bus->read_c45 = rtl_mdio_read_c45;
 	bus->write_c45 = rtl_mdio_write_c45;
 	snprintf(bus->id, MII_BUS_ID_SIZE, "%s", dev_name(dev));
-	dev_info(dev, "MDIO bus ready, PHY 1-4 on %s\n",
-		 mdio->external_phys ? "C22" : "internal OCP");
+	rtl_mdio_detect(dev, mdio);
+	dev_info(dev, "MDIO bus ready, internal OCP addresses mask %08x\n",
+		 mdio->ocp_mask);
 	return devm_of_mdiobus_register(dev, bus, dev->of_node);
 }
 

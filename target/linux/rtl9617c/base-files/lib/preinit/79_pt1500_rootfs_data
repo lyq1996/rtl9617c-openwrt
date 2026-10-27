@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# PT1500-H10: U-Boot creates rootfs_data as an empty UBI volume. Give
+# mount_root a valid UBIFS before it falls back to the tmpfs/ramoverlay path,
+# otherwise the overlay is not persistent.
+case "$(board_name)" in
+youhua,pt1500-h10) ;;
+*) exit 0 ;;
+esac
+
+[ -x /sbin/ubiupdatevol ] || exit 0
+[ -r /usr/share/pt1500/rootfs_data.ubifs ] || exit 0
+
+dev=
+for n in /sys/class/ubi/ubi0_*/name; do
+	[ -r "$n" ] || continue
+	[ "$(cat "$n")" = "rootfs_data" ] || continue
+	dev=/dev/$(basename "$(dirname "$n")")
+	break
+done
+[ -n "$dev" ] || exit 0
+
+# UBIFS superblock magic 0x06101831 lives at offset 0x800. If it is already
+# there, keep the existing overlay untouched.
+magic=$(dd if="$dev" bs=1 skip=2048 count=4 2>/dev/null | hexdump -v -e '1/1 "%02x"')
+[ "$magic" = "31181006" ] && exit 0
+
+ubiupdatevol "$dev" /usr/share/pt1500/rootfs_data.ubifs >/dev/null 2>&1
+exit 0

@@ -189,14 +189,12 @@
 	};
 };
 
-// The four GE LAN ports are four external RTL8211 PHYs on the Taurus MDIO
-// pins, addressed 1..4 (OEM scfg CFG_ID_PHY_BASE_ADDR = 1,2,3,4 with
-// CFG_ID_PHY_INTERFACE = GE for all four). There is no switch on this board,
-// so every PHY belongs to its own NI port and the NI exposes one netdev per
-// port. Addresses 1..4 must not be routed to the internal GPHY OCP window.
+// PHY 1..4 are the four internal Taurus GPHYs behind the NI register window,
+// not external RTL8211s: U-Boot reads 0x001ccac4 from each of them through
+// 0xf4600000 (reg_base 0xf4600, phy_addr<<7, reg<<2). The 802.3 Clause 45
+// part sits at address 7 on the MDIO pins (OEM scfg PHY 4 = addr 7, IF 0x0a).
 &mdio {
 	status = "okay";
-	realtek,external-phys;
 
 	phy1: ethernet-phy@1 {
 		reg = <1>;
@@ -212,8 +210,7 @@
 	};
 
 	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, Clause 45 with the
-	 * vendor HiSGMII bring-up (drivers/net/phy/realtek/rtl8221b-tyfza1.h).
-	 * OEM scfg puts it at PHY address 7 with interface 0x0a. */
+	 * vendor HiSGMII bring-up (drivers/net/phy/realtek/rtl8221b-tyfza1.h). */
 	phy_2p5g: ethernet-phy@7 {
 		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <7>;
