@@ -5,6 +5,19 @@
 
 board_config_update
 case "$(board_name)" in
+	youhua,pt1500-h10)
+		# Four jacks, lamps in panel order: LED_EPHY0 lights the 2.5G jack
+		# (NI port 4, lan5), LED_EPHY1..3 the GE jacks (NI port 1..3,
+		# lan2..lan4). The OEM drives the same four lamps from eth0.2..5
+		# after "REMAP 4;1;2;3". lan1 (NI port 0) has no jack and no lamp.
+		ucidef_set_led_netdev "lan0" "LAN1" "LED_EPHY0" "lan5"
+		ucidef_set_led_netdev "lan1" "LAN2" "LED_EPHY1" "lan2"
+		ucidef_set_led_netdev "lan2" "LAN3" "LED_EPHY2" "lan3"
+		ucidef_set_led_netdev "lan3" "LAN4" "LED_EPHY3" "lan4"
+		_ucidef_set_led_trigger "usb" "USB" "LED_USB0" "usbport"
+		board_config_flush
+		exit 0
+		;;
 	tianyi,tyfza1-2p5g)
 		# OEM EPHY0..3 follow hardware ports 4,2,1,0.
 		lan_devs="lan4 lan3 lan2 lan1"

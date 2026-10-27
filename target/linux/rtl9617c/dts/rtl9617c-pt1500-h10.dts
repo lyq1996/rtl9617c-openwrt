@@ -15,6 +15,10 @@
 
 	aliases {
 		serial0 = &uart0;
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_power;
 	};
 
 	chosen {
@@ -60,66 +64,69 @@
 		};
 	};
 
+	// Panel lamps exactly as the OEM rtk_gpio_led table wires them: all ten
+	// sit on GPIO bank 0, mixed polarity (LED_EPHY0..3 and the PON/LOS/PPP
+	// lamps are active low). Labels keep the OEM names because the target's
+	// LED helpers (rc.button/lights_toggle, hotplug.d/iface) address them by
+	// name.
 	leds {
 		compatible = "gpio-leds";
 
-		led-ppp {
-			label = "pt1500-h10:green:ppp";
-			gpios = <&gpio0 96 GPIO_ACTIVE_HIGH>;
+		internet {
+			label = "LED_PPP_G";
+			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 		};
-		led-los {
-			label = "pt1500-h10:red:los";
+		los {
+			label = "LED_LOS";
+			gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+		};
+		pon {
+			label = "LED_PON";
+			gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+		};
+		led_power: power {
+			label = "LED_PWR_G";
 			gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
-		};
-		led-usb0 {
-			label = "pt1500-h10:green:usb0";
-			gpios = <&gpio0 99 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "usbport";
-		};
-		led-usb1 {
-			label = "pt1500-h10:green:usb1";
-			gpios = <&gpio0 101 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "usbport";
-		};
-		led-pon {
-			label = "pt1500-h10:green:pon";
-			gpios = <&gpio0 108 GPIO_ACTIVE_HIGH>;
-		};
-		led-power {
-			label = "pt1500-h10:green:power";
-			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
 			default-state = "on";
 		};
-		led-fxs {
-			label = "pt1500-h10:green:fxs";
+		phone {
+			label = "LED_FXS";
 			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		};
-		led-lan0 {
-			label = "pt1500-h10:green:lan0";
-			gpios = <&gpio0 102 GPIO_ACTIVE_HIGH>;
+		usb0 {
+			label = "LED_USB0";
+			gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "usbport";
 		};
-		led-lan1 {
-			label = "pt1500-h10:green:lan1";
-			gpios = <&gpio0 103 GPIO_ACTIVE_HIGH>;
+		lan0 {
+			label = "LED_EPHY0";
+			gpios = <&gpio0 4 GPIO_ACTIVE_LOW>;
 		};
-		led-lan2 {
-			label = "pt1500-h10:green:lan2";
-			gpios = <&gpio0 97 GPIO_ACTIVE_HIGH>;
+		lan1 {
+			label = "LED_EPHY1";
+			gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
 		};
-		led-lan3 {
-			label = "pt1500-h10:green:lan3";
-			gpios = <&gpio0 100 GPIO_ACTIVE_HIGH>;
+		lan2 {
+			label = "LED_EPHY2";
+			gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		};
+		lan3 {
+			label = "LED_EPHY3";
+			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
 		};
 	};
 
+	// OEM rtk_gpio board-reset-gpio is bank0 pin8, which is also U-Boot's
+	// reset pin; the lights button is bank3 pin13 (gpio 96 + 13), the same
+	// wiring the TYFZA1 uses.
 	gpio-keys {
 		compatible = "gpio-keys";
 
 		reset {
 			label = "reset";
 			linux,code = <KEY_RESTART>;
-			gpios = <&gpio0 136 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
 			debounce-interval = <60>;
 		};
 

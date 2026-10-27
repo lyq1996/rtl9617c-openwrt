@@ -1,9 +1,36 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 [ "$ACTION" = released ] || exit 0
-mode=$(cat /sys/devices/platform/leds/mode) || exit $?
-if [ "$mode" = 0 ]; then mode=2; else mode=0; fi
-printf '%s\n' "$mode" > /sys/devices/platform/leds/mode || exit $?
-uci set system.led_control=led_control
-uci set system.led_control.mode="$mode"
-uci commit system
+
+# TYFZA1: the panel LED controller gates every lamp through its mode file.
+if [ -e /sys/devices/platform/leds/mode ]; then
+	mode=$(cat /sys/devices/platform/leds/mode) || exit $?
+	if [ "$mode" = 0 ]; then mode=2; else mode=0; fi
+	printf '%s\n' "$mode" > /sys/devices/platform/leds/mode || exit $?
+	uci set system.led_control=led_control
+	uci set system.led_control.mode="$mode"
+	uci commit system
+	exit 0
+fi
+
+# PT1500 keeps plain gpio-leds, so the button means "panel lamps off" and
+# "back to the configured triggers". The choice is not persisted: the LED
+# service restores the board defaults on the next boot.
+case "$(uci -q get system.led_control.mode)" in
+0)
+	uci set system.led_control=led_control
+	uci set system.led_control.mode=2
+	uci commit system
+	/etc/init.d/led restart
+	;;
+*)
+	uci set system.led_control=led_control
+	uci set system.led_control.mode=0
+	uci commit system
+	for led in /sys/class/leds/*; do
+		[ -e "$led/trigger" ] || continue
+		printf 'none\n' > "$led/trigger"
+		printf '0\n' > "$led/brightness"
+	done
+	;;
+esac
