@@ -83,7 +83,7 @@ pt1500_storage_setup() {
 	# overlay its space back, but never below the FIT that just booted: the
 	# size in the FDT header is the only reliable data length on a dynamic
 	# volume. Booting an image larger than the cap simply raises it.
-	header=$(dd if="/dev/$fip" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	header=$(hexdump -n 8 -v -e '8/1 "%02x"' "/dev/$fip" 2>/dev/null)
 	fit_hex=${header#????????}
 	target=$PT1500_FIP_EBS
 	case "$fit_hex" in
@@ -120,7 +120,8 @@ pt1500_storage_setup() {
 	# A first boot interrupted between ubimkvol and the seed write leaves a
 	# volume without a UBIFS superblock; rewrite the seed rather than drop to
 	# a RAM overlay for good.
-	magic=$(dd if="/dev/$data" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+	# busybox has hexdump but no od on this image.
+	magic=$(hexdump -n 4 -v -e '4/1 "%02x"' "/dev/$data" 2>/dev/null)
 	if [ "$magic" != "$PT1500_UBIFS_MAGIC" ]; then
 		pt1500_log "writing UBIFS seed to $data"
 		pt1500_seed_data "$data" || pt1500_log "seed write failed"
