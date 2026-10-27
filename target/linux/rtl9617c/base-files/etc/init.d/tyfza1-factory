@@ -1,9 +1,27 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 # Populate per-unit firmware before boot's kmodloader probes the radios.
+
+# PT1500: skip the TYFZA1 factory import entirely; factory.uc hangs on the
+# PT1500 vendor blob and blocks procd before the console starts.
+MODEL=$(cat /proc/device-tree/model 2>/dev/null; cat /sys/firmware/devicetree/base/model 2>/dev/null)
+case "$MODEL" in
+	*PT1500*) exit 0 ;;
+esac
+
 START=09
 
 start() {
+	# PT1500 uses the fip/ubi_Config layout and does not ship the TYFZA1
+	# factory blob; running factory.uc against it hangs the boot.
+	# Use the always-present DT model/compatible, not /tmp/sysinfo.
+	for f in /sys/firmware/devicetree/base/model /proc/device-tree/model; do
+		[ -r "$f" ] && grep -aq "PT1500" "$f" && return 0
+	done
+	for f in /sys/firmware/devicetree/base/compatible /proc/device-tree/compatible; do
+		[ -r "$f" ] && grep -aq "youhua,pt1500-h10" "$f" && return 0
+	done
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "youhua,pt1500-h10" ] && return 0
 	local source=/tmp/tyfza1-factory-source
 	local runtime=/tmp/tyfza1-factory
 	local device address mounted=0

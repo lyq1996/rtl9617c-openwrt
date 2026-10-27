@@ -34,6 +34,15 @@ define Build/tyfza1-rootfs-size
 	}
 endef
 
+# PT1500 fip: one FIT (kernel + DTB, config "9617c") for U-Boot's fip volume.
+define Build/fip-itb
+	$(CP) $(KDIR)/vmlinux-initramfs $@.kernel
+	$(CP) $(KDIR)/image-rtl9617c-pt1500-h10.dtb $@.dtb
+	printf '/dts-v1/;\n/ {\n description = "OpenWrt PT1500-H10 fip";\n #address-cells = <1>;\n images {\n  kernel {\n   description = "OpenWrt initramfs";\n   data = /incbin/("%s");\n   type = "kernel";\n   arch = "arm64";\n   os = "linux";\n   compression = "none";\n   load = <0x08000000>;\n   entry = <0x08000000>;\n  };\n  fdt {\n   description = "PT1500-H10 DTB";\n   data = /incbin/("%s");\n   type = "flat_dt";\n   arch = "arm64";\n   compression = "none";\n   load = <0x0a000000>;\n  };\n };\n configurations {\n  default = "9617c";\n  9617c {\n   description = "PT1500-H10";\n   kernel = "kernel";\n   fdt = "fdt";\n  };\n };\n};\n' "$@.kernel" "$@.dtb" > $@.its
+	$(STAGING_DIR_HOST)/bin/mkimage -f $@.its $@
+	$(RM) $@.kernel $@.dtb $@.its
+endef
+
 define Device/tianyi_tyfza1
   DEVICE_VENDOR := Tianyi
   DEVICE_MODEL := TYFZA1
@@ -74,7 +83,7 @@ define Device/tianyi_tyfza1
   ARTIFACT/ubi.dtb := tyfza1-dtb rtl9617c-tyfza1-ubi
   ARTIFACT/ubi-2p5g.dtb := tyfza1-dtb rtl9617c-tyfza1-ubi-2p5g
 endef
-TARGET_DEVICES += tianyi_tyfza1
+# TARGET_DEVICES += tianyi_tyfza1  # TYFZA1 needs external fit tools; PT1500-only build
 
 # PT1500-H10 bring-up: initramfs-first. The OEM bootloader keeps the kernel
 # and DTB in separate UBI volumes without a FIT, so production images wait
@@ -91,7 +100,8 @@ define Device/youhua_pt1500_h10
   KERNEL_INITRAMFS_SUFFIX := -initramfs-Image
   KERNEL_INSTALL := 1
   FILESYSTEMS := squashfs
-  IMAGES :=
+  IMAGES := fip.itb
+  IMAGE/fip.itb := fip-itb
   ARTIFACTS := board.dtb
   ARTIFACT/board.dtb := tyfza1-dtb rtl9617c-pt1500-h10
 endef
