@@ -135,6 +135,7 @@ struct rtl_xram {
 	bool rx_active;
 	u32 port;
 	u32 qx_last;
+	u32 ni_last;
 	bool tx_pending;
 	unsigned int tx_length;
 	u8 tx_buffer[2048];
@@ -1433,6 +1434,40 @@ static ssize_t qx_reg_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RW(qx_reg);
 
+/* Raw NI window access for bring-up: r <off> / w <off> <val>. */
+static ssize_t ni_reg_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+
+	return sysfs_emit(buf, "last=%08x\n", priv->ni_last);
+}
+
+static ssize_t ni_reg_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+	unsigned long offset = 0, value = 0;
+	char op[8] = "";
+	int n;
+
+	n = sscanf(buf, "%7s %li %li", op, &offset, &value);
+	if (offset >= 0x10000)
+		return count;
+	if (!strcmp(op, "w") && n >= 3) {
+		writel(value, priv->ni + offset);
+		priv->ni_last = readl(priv->ni + offset);
+	} else if (!strcmp(op, "r") && n >= 2) {
+		priv->ni_last = readl(priv->ni + offset);
+	}
+	dev_info(dev, "ni %s %lx = %08x\n", op, offset, priv->ni_last);
+
+	return count;
+}
+static DEVICE_ATTR_RW(ni_reg);
+
 static ssize_t dma_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
@@ -1611,6 +1646,7 @@ static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_xram_state.attr,
 	&dev_attr_ports_state.attr,
 	&dev_attr_qx_reg.attr,
+	&dev_attr_ni_reg.attr,
 	&dev_attr_dma_state.attr,
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
