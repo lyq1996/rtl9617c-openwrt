@@ -134,6 +134,7 @@ struct rtl_xram {
 	unsigned long long mib_total[5][RTL_NI_MIB_COUNTERS];
 	bool rx_active;
 	u32 port;
+	u32 qx_last;
 	bool tx_pending;
 	unsigned int tx_length;
 	u8 tx_buffer[2048];
@@ -688,6 +689,16 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	else
 		dev_warn(priv->netdev->dev.parent, "serdes load %s failed\n",
 			 priv->p6_profile[0].path);
+
+	/*
+	 * QX_RESET bit0 holds the lane in reset. Measured on the unit:
+	 * with bit0 set QX_SDS_STATE stays 0x4000 (clock-ready bit13 clear)
+	 * forever, and clearing it makes the state read 0x6000 (bit13 set)
+	 * within a second, with the table already loaded. The stock sequence
+	 * sets the bit around the table write and releases it before waiting,
+	 * so release it here.
+	 */
+	writel(readl(priv->p6_serdes) & ~BIT(0), priv->p6_serdes);
 
 	for (i = 0; i < RTL_P6_CLOCK_TRIES && !rtl_p6_clock_ready(priv); i++)
 		mdelay(RTL_P6_CLOCK_STEP_MS);
@@ -1327,6 +1338,79 @@ static ssize_t ports_state_show(struct device *dev, struct device_attribute *att
 }
 static DEVICE_ATTR_RO(ports_state);
 
+/*
+ * Live access to the P6 (QX) SerDes block while bringing the 2.5G lane up:
+ *
+ *   w <offset> <value>   write QX+offset (0..0xfff)
+ *   r <offset>           read QX+offset
+ *   t                    replay /etc/serdes/p6_serdes_sgmii_2g5.txt, then
+ *                        report QX_SDS_STATE and the clock-ready bit
+ *
+ * The clock-ready bit (bit13 of QX_SDS_STATE) is what the stock
+ * __p6_checkSdsClkReady() waits for; knowing which write makes it appear
+ * avoids a rebuild per guess.
+ */
+static ssize_t qx_reg_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+	unsigned int i;
+	ssize_t len = 0;
+
+	if (!priv->p6_serdes)
+		return sysfs_emit(buf, "no p6-serdes resource\n");
+
+	len += sysfs_emit_at(buf, len, "state=%08x ready=%u last=%08x\n",
+			     readl(priv->p6_serdes + 0x58),
+			     !!(readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT),
+			     priv->qx_last);
+	for (i = 0; i < 0x10; i += 4)
+		len += sysfs_emit_at(buf, len, "%02x=%08x ", i,
+				     readl(priv->p6_serdes + i));
+	len += sysfs_emit_at(buf, len, "writes=%u\n", priv->p6_profile[0].count);
+
+	return len;
+}
+
+static ssize_t qx_reg_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+	unsigned long offset = 0, value = 0;
+	char op[8] = "";
+	int n;
+
+	if (!priv->p6_serdes)
+		return count;
+
+	n = sscanf(buf, "%7s %li %li", op, &offset, &value);
+	if (!strcmp(op, "w") && n >= 3 && offset < 0x1000) {
+		writel(value, priv->p6_serdes + offset);
+		priv->qx_last = readl(priv->p6_serdes + offset);
+	} else if (!strcmp(op, "r") && n >= 2 && offset < 0x1000) {
+		priv->qx_last = readl(priv->p6_serdes + offset);
+	} else if (!strcmp(op, "t")) {
+		unsigned int i;
+
+		if (!rtl_p6_read(priv, &priv->p6_profile[0]))
+			rtl_p6_apply(priv, &priv->p6_profile[0]);
+		for (i = 0; i < RTL_P6_CLOCK_TRIES; i++) {
+			if (rtl_p6_clock_ready(priv))
+				break;
+			mdelay(RTL_P6_CLOCK_STEP_MS);
+		}
+		priv->qx_last = readl(priv->p6_serdes + 0x58);
+		dev_info(dev, "qx replay: %u writes, state %08x, ready %u\n",
+			 priv->p6_profile[0].count, priv->qx_last,
+			 !!(priv->qx_last & RTL_P6_CLOCK_BIT));
+	}
+
+	return count;
+}
+static DEVICE_ATTR_RW(qx_reg);
+
 static ssize_t dma_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
@@ -1504,6 +1588,7 @@ static DEVICE_ATTR_RW(rx_bypass);
 static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_xram_state.attr,
 	&dev_attr_ports_state.attr,
+	&dev_attr_qx_reg.attr,
 	&dev_attr_dma_state.attr,
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
