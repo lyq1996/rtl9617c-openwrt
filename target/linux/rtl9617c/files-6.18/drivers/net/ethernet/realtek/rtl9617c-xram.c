@@ -1071,9 +1071,13 @@ static const struct ethtool_ops rtl_ethtool_ops = {
 static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 {
 	struct rtl_xram *priv = container_of(led, struct rtl_xram, phy_led);
-	/* Original LED0: 0=off, 1=on, 2=PHY link/activity (LCR7 bits0/4). */
+	/* LCR7 bit0 forces the lamp, bit4 inverts link/activity. The TYFZA1
+	 * value 0x10 for "link/activity" is inverted on this unit: measured
+	 * with the cable out the lamp was lit, with it in it went dark, and
+	 * traffic made it blink. Leaving both bits clear lets the PHY drive
+	 * its own link/activity with normal polarity. */
 	return phy_modify_mmd(priv->ports[4]->phydev, MDIO_MMD_VEND2,
-			      0xd044, 0x11, value == 2 ? 0x10 : value);
+			      0xd044, 0x11, value == 2 ? 0x00 : value);
 }
 
 static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)

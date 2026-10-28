@@ -41,7 +41,7 @@ pt1500_node() {
 	local class="$1" node="$2" dev
 
 	[ -e "$node" ] && return 0
-	dev=$(cat "/sys/class/ubi/$class/dev" 2>/dev/null) || return 1
+	dev=$(cat "/sys/class/ubi/${class##*/}/dev" 2>/dev/null) || return 1
 	mknod "$node" c "${dev%%:*}" "${dev##*:}"
 }
 
@@ -50,7 +50,7 @@ pt1500_seed_data() {
 
 	[ -f /usr/share/pt1500/overlay-seed.ubifs.gz ] || return 1
 	gunzip -c /usr/share/pt1500/overlay-seed.ubifs.gz > /tmp/.ubifs-seed &&
-		ubiupdatevol "/dev/$data" /tmp/.ubifs-seed
+		ubiupdatevol "/dev/${data##*/}" /tmp/.ubifs-seed
 	local ret=$?
 	rm -f /tmp/.ubifs-seed
 
@@ -81,7 +81,7 @@ pt1500_storage_setup() {
 		pt1500_log "no fip volume; install a system from U-Boot first"
 		return 0
 	fi
-	pt1500_node "$fip" "/dev/$fip" || {
+	pt1500_node "$fip" "/dev/${fip##*/}" || {
 		pt1500_log "no node for $fip"
 		return 0
 	}
@@ -121,7 +121,7 @@ pt1500_storage_setup() {
 		ubimkvol /dev/ubi0 -N rootfs_data -s "$((avail * leb))" || return 0
 		data=$(pt1500_volume rootfs_data) || return 0
 	fi
-	pt1500_node "$data" "/dev/$data" || {
+	pt1500_node "$data" "/dev/${data##*/}" || {
 		pt1500_log "no node for $data"
 		return 0
 	}
@@ -130,7 +130,7 @@ pt1500_storage_setup() {
 	# A first boot interrupted between ubimkvol and the seed write leaves a
 	# volume without a UBIFS superblock; rewrite the seed rather than run
 	# without persistence for good. busybox has hexdump but no od here.
-	magic=$(hexdump -n 4 -v -e '4/1 "%02x"' "/dev/$data" 2>/dev/null)
+	magic=$(hexdump -n 4 -v -e '4/1 "%02x"' "/dev/${data##*/}" 2>/dev/null)
 	if [ "$magic" != "$PT1500_UBIFS_MAGIC" ]; then
 		pt1500_log "writing UBIFS seed to $data"
 		pt1500_seed_data "$data" || pt1500_log "seed write failed"
@@ -142,7 +142,7 @@ pt1500_storage_setup() {
 	mkdir -p /overlay
 	if ! grep -q " /overlay " /proc/mounts; then
 		pt1500_log "mounting $data as /overlay"
-		mount -t ubifs "/dev/$data" /overlay || {
+		mount -t ubifs "/dev/${data##*/}" /overlay || {
 			pt1500_log "UBIFS mount failed"
 			return 1
 		}

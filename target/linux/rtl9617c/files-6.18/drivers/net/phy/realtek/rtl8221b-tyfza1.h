@@ -223,9 +223,14 @@ static int rtl8221b_tyfza1_get_features(struct phy_device *phydev)
 static int rtl8221b_tyfza1_match(struct phy_device *phydev,
 			       const struct phy_driver *driver)
 {
-	return phydev->is_c45 &&
-	       of_property_read_bool(phydev->mdio.dev.of_node, "realtek,hsgmii") &&
-	       (phydev->c45_ids.device_ids[MDIO_MMD_PMAPMD] & 0xfffffff0) == 0x001cc840;
+	if (!of_property_read_bool(phydev->mdio.dev.of_node, "realtek,hsgmii"))
+		return 0;
+	/* This board answers Clause 22 at its address (0x001cc849) and nothing
+	 * through Clause 45 framing, so both descriptions have to match. */
+	if (phydev->is_c45)
+		return (phydev->c45_ids.device_ids[MDIO_MMD_PMAPMD] & 0xfffffff0) ==
+		       0x001cc840;
+	return (phydev->phy_id & 0xfffffff0) == 0x001cc840;
 }
 
 #endif
