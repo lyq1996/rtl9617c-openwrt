@@ -46,6 +46,8 @@ struct rtl9617c_mdio {
 	u32 ocp_mask;
 	/* realtek,external-phys: when both paths answer, prefer the pins. */
 	bool prefer_c22;
+	/* Result of the last phyreg command, surfaced through sysfs. */
+	u32 last;
 };
 
 static bool rtl_mdio_internal(struct rtl9617c_mdio *mdio, int phy)
@@ -172,6 +174,76 @@ static int rtl_mdio_read_c45(struct mii_bus *bus, int phy, int devad, int reg)
 	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, 0, true);
 }
 
+/* Indirect MMD access over Clause 22 (registers 0x0d/0x0e), which is how this
+ * PHY is reached on the board's MDIO pins. */
+static int rtl_mdio_mmd(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
+			u16 value, bool read)
+{
+	int ret;
+
+	ret = rtl_mdio_c22(mdio, phy, MII_MMD_CTRL, devad, false);
+	if (ret < 0)
+		return ret;
+	ret = rtl_mdio_c22(mdio, phy, MII_MMD_DATA, reg, false);
+	if (ret < 0)
+		return ret;
+	ret = rtl_mdio_c22(mdio, phy, MII_MMD_CTRL, 0x4000 | devad, false);
+	if (ret < 0)
+		return ret;
+	return rtl_mdio_c22(mdio, phy, MII_MMD_DATA, value, read);
+}
+
+/*
+ * Board bring-up aid: /sys/bus/platform/devices/<mdio>/phyreg
+ *
+ *   w  <phy> <reg> <value>            Clause 22 write
+ *   r  <phy> <reg>                    Clause 22 read
+ *   mw <phy> <devad> <reg> <value>    indirect MMD write
+ *   mr <phy> <devad> <reg>            indirect MMD read
+ *
+ * The result of the last command is printed when the file is read.
+ */
+static ssize_t phyreg_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct rtl9617c_mdio *mdio = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "last=%08x (r/w p r [v], mr/mw p d r [v])\n",
+			  mdio->last);
+}
+
+static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct rtl9617c_mdio *mdio = dev_get_drvdata(dev);
+	unsigned long phy = 0, reg = 0, devad = 0, value = 0;
+	char op[8] = "";
+	int ret, n;
+
+	n = sscanf(buf, "%7s %li %li %li %li", op, &phy, &reg, &devad, &value);
+	if (n < 3 || phy > 31 || reg > 31 || devad > 31) {
+		mdio->last = 0xdead0000;
+		return count;
+	}
+	if (!strcmp(op, "r")) {
+		ret = rtl_mdio_c22(mdio, phy, reg, 0, true);
+	} else if (!strcmp(op, "w") && n >= 4) {
+		ret = rtl_mdio_c22(mdio, phy, reg, value, false);
+	} else if (!strcmp(op, "mr")) {
+		ret = rtl_mdio_mmd(mdio, phy, devad, reg, 0, true);
+	} else if (!strcmp(op, "mw") && n >= 5) {
+		ret = rtl_mdio_mmd(mdio, phy, devad, reg, value, false);
+	} else {
+		mdio->last = 0xdead0001;
+		return count;
+	}
+	mdio->last = ret < 0 ? (0xbad00000 | (u32)-ret) : (u32)ret;
+	dev_info(dev, "phyreg %s: %08x\n", op, mdio->last);
+
+	return count;
+}
+static DEVICE_ATTR_RW(phyreg);
+
 static int rtl_mdio_write_c45(struct mii_bus *bus, int phy, int devad, int reg, u16 value)
 {
 	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, value, false);
@@ -277,6 +349,8 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	rtl_mdio_detect(dev, mdio);
 	dev_info(dev, "MDIO bus ready, internal OCP addresses mask %08x\n",
 		 mdio->ocp_mask);
+	platform_set_drvdata(pdev, mdio);
+	device_create_file(dev, &dev_attr_phyreg);
 	return devm_of_mdiobus_register(dev, bus, dev->of_node);
 }
 

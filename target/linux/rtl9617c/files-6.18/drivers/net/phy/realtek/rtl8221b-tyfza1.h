@@ -190,6 +190,12 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 {
 	int ret;
 
+	/* Bring-up switch: on some boards the vendor patch load leaves the part
+	 * unreachable (status reads then fail with -EINVAL), so allow the tree
+	 * to keep the PHY in its power-on state for inspection. */
+	if (of_property_read_bool(phydev->mdio.dev.of_node, "realtek,hsgmii-init-off"))
+		return 0;
+
 	ret = rtl8221b_wait_ready(phydev);
 	if (ret < 0)
 		goto error;

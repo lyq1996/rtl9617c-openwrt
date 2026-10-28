@@ -217,6 +217,7 @@
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
 		realtek,hsgmii;
+		realtek,hsgmii-init-off;
 	};
 };
 
