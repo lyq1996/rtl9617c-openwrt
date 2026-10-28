@@ -532,7 +532,10 @@ static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 {
 	size_t size = 0;
 	ssize_t ret;
-	void *buf, *end_buf;
+	/* kernel_read_file_from_path() allocates the buffer itself and only
+	 * does so when *buf is NULL: an uninitialised pointer is used as the
+	 * read destination and faults inside copy_page_to_iter(). */
+	void *buf = NULL, *end_buf;
 	char *line, *next, *token;
 	unsigned long offset, value;
 
@@ -543,6 +546,11 @@ static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 	if (ret < 0) {
 		profile->status = ret;
 		return ret;
+	}
+	if (!size || size > 0x10000) {
+		vfree(buf);
+		profile->status = -EINVAL;
+		return -EINVAL;
 	}
 	end_buf = buf + size;
 	for (line = buf; line < (char *)end_buf; line = next) {
