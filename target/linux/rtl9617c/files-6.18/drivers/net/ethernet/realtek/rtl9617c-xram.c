@@ -1334,6 +1334,12 @@ static ssize_t ports_state_show(struct device *dev, struct device_attribute *att
 				     readl(priv->p6_serdes), readl(priv->p6_serdes + 0x4),
 				     readl(priv->p6_serdes + 0x8),
 				     readl(priv->p6_serdes + 0x58));
+	/* The whole P6 XGE MAC block, to compare TX-only registers (which the
+	 * stock speed sequence programs) against the receive side. */
+	len += sysfs_emit_at(buf, len, "xgemac:");
+	for (reg = 0; reg < 0x30; reg += 4)
+		len += sysfs_emit_at(buf, len, " %08x", readl(priv->ni + 0xb200 + reg));
+	len += sysfs_emit_at(buf, len, "\n");
 	return len;
 }
 static DEVICE_ATTR_RO(ports_state);
