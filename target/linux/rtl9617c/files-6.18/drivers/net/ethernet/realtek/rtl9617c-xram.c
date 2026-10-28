@@ -885,6 +885,15 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	u8 mac[ETH_ALEN];
 	int ret;
 
+	/*
+	 * Port 4 is the SGMII/2.5G jack. Measured with the ports_state dump on
+	 * this board: its port block at 0xa5c0 + 0x90 * 4 reads back port 0's
+	 * values (same static word including port 0's MAC byte, RXMAC 0x1100
+	 * with rx_en clear), so the NI port-static table only decodes four
+	 * ports and anything written for port 4 aliases port 0. The 2.5G MAC
+	 * therefore still needs its own receive setup somewhere else; until
+	 * that is found this port links through the PHY but passes no frames.
+	 */
 	if (port == 4) {
 		priv->sgmii = devm_phy_get(parent, "sgmii");
 		if (IS_ERR(priv->sgmii)) {
