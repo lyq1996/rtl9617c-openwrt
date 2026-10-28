@@ -1039,6 +1039,37 @@ static ssize_t xram_state_show(struct device *dev, struct device_attribute *attr
 }
 static DEVICE_ATTR_RO(xram_state);
 
+/*
+ * Per-port register block, port 0..4 (0xa5c0 + 0x90 * port):
+ *   +0x00 static, +0x04 link/speed, +0x08 RXMAC, +0x0c RXMAC WOL,
+ *   +0x10 MAC status, +0x14 TXMAC, then the rest of the block.
+ * Bring-up aid: the SGMII port's receive path can only be compared against a
+ * working GE port if both register sets are visible.
+ */
+static ssize_t ports_state_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+	unsigned int port, reg;
+	ssize_t len = 0;
+
+	for (port = 0; port < ARRAY_SIZE(priv->ports); port++) {
+		len += sysfs_emit_at(buf, len, "port%u:", port);
+		for (reg = 0; reg < 12; reg++)
+			len += sysfs_emit_at(buf, len, " %08x",
+					     readl(priv->ni + PORT_STATIC +
+						   PORT_STRIDE * port + reg * 4));
+		len += sysfs_emit_at(buf, len, "\n");
+	}
+	len += sysfs_emit_at(buf, len, "glb_static=%08x sel=%08x/%08x/%08x/%08x\n",
+			     readl(priv->ni + GLB_STATIC),
+			     readl(priv->ni + 0xa1e0), readl(priv->ni + 0xa1e4),
+			     readl(priv->ni + 0xa1e8), readl(priv->ni + 0xa1ec));
+	return len;
+}
+static DEVICE_ATTR_RO(ports_state);
+
 static ssize_t dma_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
@@ -1215,6 +1246,7 @@ static DEVICE_ATTR_RW(rx_bypass);
 
 static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_xram_state.attr,
+	&dev_attr_ports_state.attr,
 	&dev_attr_dma_state.attr,
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
