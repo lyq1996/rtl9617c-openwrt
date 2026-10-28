@@ -9,6 +9,7 @@
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/crc32.h>
+#include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -16,6 +17,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/kernel_read_file.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
@@ -27,6 +29,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/unaligned.h>
 #include <linux/tyfza1-led.h>
+#include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 
 #include "rtl9617c-xram-format.h"
@@ -67,6 +70,39 @@ struct rtl_lan {
 	unsigned int port;
 };
 
+/*
+ * The 2.5G jack is the P6 XGE MAC, not a row in the NI port table: its MAC
+ * lives at 0xf430b200..0xf430b2ac and its lane is the QX SerDes block at
+ * 0xf550d000, configured exactly like the stock aal_sds_mode_set() path
+ * (lane 1 + speed 1 = sgmii_2g5): release the shared serdes reset, power the
+ * QX lane, write the interface mode word, replay the vendor serdes table from
+ * /etc/serdes, wait for the serdes clock, then program the XGE MAC with the
+ * 1G sequence (2.5G reuses it; only the lane table differs).
+ */
+#define RTL_P6_QX_BASE		0xf550d000UL
+#define RTL_P6_MAX_WRITES	400
+#define RTL_P6_MODE_SGMII_1G	0x4cf6
+#define RTL_P6_MODE_SGMII_2G5	0x4cf5
+#define RTL_P6_CLOCK_BIT	BIT(13)		/* QX_SDS_STATE ready */
+#define RTL_P6_CLOCK_TRIES	1501
+#define RTL_P6_CLOCK_STEP_MS	10
+
+#define XGE_MAC_CFG_COM		0xb200
+#define XGE_MAC_CFG_TX		0xb208
+#define XGE_MAC_CFG_TX_2	0xb20c
+#define XGE_MISC_CONFIG		0xb2a8
+#define NITX_MISC_CFG		0xa1f4
+#define L2TM_ES_CTRL		0x2300
+#define QM_ES_CTRL		0x6108
+
+struct rtl_p6_profile {
+	const char *path;
+	unsigned int speed;
+	unsigned int count;
+	int status;			/* 0 unread, 1 ready, <0 failed */
+	u32 word[RTL_P6_MAX_WRITES][2];
+};
+
 struct rtl_xram {
 	/* Primary netdev embeds the shared engine;other LANs only carry this
 	 * initial per-port member and use the same NI/DMA/QM owner. */
@@ -80,6 +116,9 @@ struct rtl_xram {
 	struct device_node *lan4_phy;
 	void __iomem *ni;
 	void __iomem *xram;
+	void __iomem *p6_serdes;
+	struct rtl_p6_profile p6_profile[2];
+	bool p6_started;
 	struct phy *sgmii;
 	unsigned int sgmii_speed;
 	struct tyfza1_led phy_led;
@@ -275,6 +314,8 @@ static void rtl_mac_address(struct rtl_xram *priv)
 		   GENMASK(31, 24), (u32)mac[5] << 24);
 }
 
+static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed);
+
 static void rtl_adjust_link(struct net_device *dev)
 {
 	struct rtl_lan *lan = netdev_priv(dev);
@@ -289,7 +330,10 @@ static void rtl_adjust_link(struct net_device *dev)
 			   BIT(0) | BIT(1), (phy->speed == SPEED_10 ? BIT(0) : 0) |
 			   (phy->duplex == DUPLEX_HALF ? BIT(1) : 0));
 		if (lan->port == 4 && lan->shared->sgmii_speed != phy->speed) {
-			int ret = phy_set_speed(lan->shared->sgmii, phy->speed);
+			int ret;
+
+			rtl_p6_set_speed(lan->shared, phy->speed);
+			ret = phy_set_speed(lan->shared->sgmii, phy->speed);
 
 			if (ret) {
 				netdev_err(dev, "S3 speed %d failed: %d\n", phy->speed, ret);
@@ -484,12 +528,175 @@ static netdev_tx_t rtl_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
+{
+	size_t size = 0;
+	ssize_t ret;
+	void *buf, *end_buf;
+	char *line, *next, *token;
+	unsigned long offset, value;
+
+	if (profile->status)
+		return profile->status > 0 ? 0 : profile->status;
+	ret = kernel_read_file_from_path(profile->path, 0, &buf, 0x10000, &size,
+					 READING_UNKNOWN);
+	if (ret < 0) {
+		profile->status = ret;
+		return ret;
+	}
+	end_buf = buf + size;
+	for (line = buf; line < (char *)end_buf; line = next) {
+		next = memchr(line, '\n', (char *)end_buf - line);
+		if (next)
+			*next++ = '\0';
+		else
+			next = end_buf;
+		token = skip_spaces(line);
+		if (*token == '#' || !*token)
+			continue;
+		if (kstrtoul(token, 0, &offset))
+			continue;
+		while (*token && !isspace(*token))
+			token++;
+		if (kstrtoul(skip_spaces(token), 0, &value))
+			continue;
+		if (offset < RTL_P6_QX_BASE || offset >= RTL_P6_QX_BASE + 0x1000)
+			continue;
+		profile->word[profile->count][0] = offset - RTL_P6_QX_BASE;
+		profile->word[profile->count][1] = value;
+		if (++profile->count == RTL_P6_MAX_WRITES)
+			break;
+	}
+	vfree(buf);
+	profile->status = 1;
+	return 0;
+}
+
+/* Replaying the table is what the stock device tree calls a lane load: each
+ * line writes QX_REG_DATAIN, then QX_REG_ACCESS to trigger it. */
+static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
+{
+	unsigned int i;
+
+	for (i = 0; i < profile->count; i++)
+		writel(profile->word[i][1], priv->p6_serdes + profile->word[i][0]);
+}
+
+static bool rtl_p6_clock_ready(struct rtl_xram *priv)
+{
+	return readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT;
+}
+
+static void rtl_p6_mode_word(struct rtl_xram *priv, u32 word)
+{
+	writel((readl(priv->p6_serdes + 0x8) & ~0x1ffffU) | (word & 0x1ffffU),
+	       priv->p6_serdes + 0x8);
+}
+
+/* __p6_mac_1g_config(): the XGE MAC sequence shared by 1G and 2.5G. */
+static void rtl_p6_mac_config(struct rtl_xram *priv)
+{
+	void __iomem *ni = priv->ni;
+	u32 es, qm, value;
+
+	/* Hold L2 learning/forwarding while the MAC is reprogrammed. */
+	es = readl(ni + L2TM_ES_CTRL);
+	writel(es & ~BIT(6), ni + L2TM_ES_CTRL);
+	qm = readl(ni + QM_ES_CTRL);
+	writel((qm & 0xffff0000U) | (qm & 0xffU) | ((qm >> 8) & 0xbfU) << 8,
+	       ni + QM_ES_CTRL);
+	writel(readl(ni + NITX_MISC_CFG) | BIT(20), ni + NITX_MISC_CFG);
+
+	value = readl(ni + XGE_MISC_CONFIG) & 0xcfffffffU;
+	writel(value | 0x80000000U, ni + XGE_MISC_CONFIG);
+	writel(value | 0xb0000000U, ni + XGE_MISC_CONFIG);
+	mdelay(1);
+
+	writel(readl(ni + XGE_MAC_CFG_TX) & ~0x3U, ni + XGE_MAC_CFG_TX);
+	writel(readl(ni + XGE_MAC_CFG_TX) | 1, ni + XGE_MAC_CFG_TX);
+	value = readl(ni + XGE_MAC_CFG_TX_2);
+	writel((value & 0xffffe000U) | (value & 0xe0U) | 0xa00U | 10,
+	       ni + XGE_MAC_CFG_TX_2);
+	writel((readl(ni + XGE_MAC_CFG_COM) & 0xffffdf8fU) | 0xc000U,
+	       ni + XGE_MAC_CFG_COM);
+	mdelay(1);
+	writel(readl(ni + XGE_MAC_CFG_COM) & 0xffff1f8fU, ni + XGE_MAC_CFG_COM);
+
+	value = readl(ni + XGE_MISC_CONFIG);
+	writel((value & 0xcfffffffU) | 0x80000000U, ni + XGE_MISC_CONFIG);
+	writel((value & 0xc0000000U) | 0x80000000U | (value & 0x0fffffffU) |
+	       0x10000000U, ni + XGE_MISC_CONFIG);
+	writel(readl(ni + NITX_MISC_CFG) & 0xffefffffU, ni + NITX_MISC_CFG);
+
+	writel(readl(ni + L2TM_ES_CTRL) | BIT(6), ni + L2TM_ES_CTRL);
+	writel((qm & 0xffff0000U) | (qm & 0xffU) | (((qm >> 8) & 0xffU) | 0x40) << 8,
+	       ni + QM_ES_CTRL);
+}
+
+static void rtl_p6_bringup(struct rtl_xram *priv)
+{
+	unsigned int i;
+	u32 value;
+
+	if (!priv->p6_serdes || priv->p6_started)
+		return;
+	priv->p6_started = true;
+
+	/* GLOBAL_BLOCK_RESET bit31 pulses the shared SerDes logic. */
+	if (priv->qm.block_reset) {
+		value = readl(priv->qm.block_reset);
+		writel(value | BIT(31), priv->qm.block_reset);
+		udelay(1);
+		writel(value & ~BIT(31), priv->qm.block_reset);
+	}
+
+	/* Power the QX lane and select the SGMII 2.5G interface mode. */
+	writel(readl(priv->p6_serdes) | BIT(0), priv->p6_serdes);
+	writel(readl(priv->p6_serdes + 0x4) | 0x1f, priv->p6_serdes + 0x4);
+	mdelay(1);
+	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | 2, priv->p6_serdes + 0x4);
+	rtl_p6_mode_word(priv, RTL_P6_MODE_SGMII_2G5);
+
+	if (rtl_p6_read(priv, &priv->p6_profile[0]) == 0)
+		rtl_p6_apply(priv, &priv->p6_profile[0]);
+	else
+		dev_warn(priv->netdev->dev.parent, "serdes load %s failed\n",
+			 priv->p6_profile[0].path);
+
+	for (i = 0; i < RTL_P6_CLOCK_TRIES && !rtl_p6_clock_ready(priv); i++)
+		mdelay(RTL_P6_CLOCK_STEP_MS);
+	dev_info(priv->netdev->dev.parent,
+		 "P6 serdes: %u writes, clock %s, state %08x\n",
+		 priv->p6_profile[0].count,
+		 rtl_p6_clock_ready(priv) ? "ready" : "timeout",
+		 readl(priv->p6_serdes + 0x58));
+
+	rtl_p6_mac_config(priv);
+}
+
+/* A 1G peer needs the matching lane load; 2.5G keeps the sgmii_2g5 profile. */
+static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
+{
+	struct rtl_p6_profile *profile = &priv->p6_profile[speed == SPEED_2500 ? 0 : 1];
+
+	if (!priv->p6_serdes)
+		return;
+	if (!rtl_p6_read(priv, profile) && profile->count)
+		rtl_p6_apply(priv, profile);
+	rtl_p6_mode_word(priv, speed == SPEED_2500 ? RTL_P6_MODE_SGMII_2G5 :
+			 RTL_P6_MODE_SGMII_1G);
+}
+
 static int rtl_engine_start(struct rtl_xram *priv)
 {
 	struct net_device *dev = priv->netdev;
 	unsigned int port;
 	u32 config;
 	int ret;
+
+	/* The 2.5G lane must be alive before the switch fabric forwards to it. */
+	if (priv->ports[4])
+		rtl_p6_bringup(priv);
 
 	if (priv->dma_tx) {
 		/* The bootloader's XRAM path leaves the normal LAN scheduler off. */
@@ -1075,6 +1282,17 @@ static ssize_t ports_state_show(struct device *dev, struct device_attribute *att
 			     readl(priv->ni + GLB_STATIC),
 			     readl(priv->ni + 0xa1e0), readl(priv->ni + 0xa1e4),
 			     readl(priv->ni + 0xa1e8), readl(priv->ni + 0xa1ec));
+	len += sysfs_emit_at(buf, len, "xge_com=%08x tx=%08x tx2=%08x misc=%08x nitx=%08x\n",
+			     readl(priv->ni + XGE_MAC_CFG_COM),
+			     readl(priv->ni + XGE_MAC_CFG_TX),
+			     readl(priv->ni + XGE_MAC_CFG_TX_2),
+			     readl(priv->ni + XGE_MISC_CONFIG),
+			     readl(priv->ni + NITX_MISC_CFG));
+	if (priv->p6_serdes)
+		len += sysfs_emit_at(buf, len, "qx=%08x/%08x/%08x state=%08x\n",
+				     readl(priv->p6_serdes), readl(priv->p6_serdes + 0x4),
+				     readl(priv->p6_serdes + 0x8),
+				     readl(priv->p6_serdes + 0x58));
 	return len;
 }
 static DEVICE_ATTR_RO(ports_state);
@@ -1312,6 +1530,18 @@ static int rtl_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->ni) || IS_ERR(priv->xram)) {
 		ret = IS_ERR(priv->ni) ? PTR_ERR(priv->ni) : PTR_ERR(priv->xram);
 		goto free_netdev;
+	}
+	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
+	priv->p6_profile[0].speed = SPEED_2500;
+	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
+	priv->p6_profile[1].speed = SPEED_1000;
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "p6-serdes")) {
+		priv->p6_serdes = devm_platform_ioremap_resource_byname(pdev,
+								       "p6-serdes");
+		if (IS_ERR(priv->p6_serdes)) {
+			ret = PTR_ERR(priv->p6_serdes);
+			goto free_netdev;
+		}
 	}
 	ret = of_property_read_u32(dev->of_node, "realtek,port", &priv->port);
 	if (ret)
