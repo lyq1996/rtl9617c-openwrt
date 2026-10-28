@@ -43,8 +43,13 @@ static int rtl8221b_wait_ready(struct phy_device *phydev)
 {
 	int val;
 
+	/* The part needs about a second after reset before 0xa420 reports
+	 * ready (measured on the PT1500: 0x23 once settled). The 100 ms the
+	 * OEM used here aborted config_init with -ETIMEDOUT, which left the
+	 * line side of the PHY unconfigured: the copper link came up at 2.5G
+	 * while the SoC saw no frames at all. */
 	return phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND2, 0xa420,
-					val, (val & 3) == 3, 1000, 100000, false);
+					val, (val & 3) == 3, 2000, 1500000, false);
 }
 
 static int rtl8221b_load_patch(struct phy_device *phydev)

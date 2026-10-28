@@ -216,12 +216,9 @@
 	 * header reads its registers through indirect MMD on top of C22. */
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
+		/* Vendor HiSGMII bring-up: the 2.5G jack only passes frames once
+		 * the PHY's line side is put in HSGMII mode. */
 		realtek,hsgmii;
-		/* The vendor patch load ends in phy_error() on this unit (-110 on
-		 * the 0xa420 ACK), after which carrier and speed read EINVAL. The
-		 * part links at 2.5G with its power-on HSGMII state, so keep the
-		 * init off until the sequence is retraced register by register. */
-		realtek,hsgmii-init-off;
 	};
 };
 
