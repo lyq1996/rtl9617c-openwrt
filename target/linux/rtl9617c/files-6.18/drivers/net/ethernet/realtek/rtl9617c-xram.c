@@ -709,6 +709,22 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		 readl(priv->p6_serdes + 0x58));
 
 	rtl_p6_mac_config(priv);
+
+	/*
+	 * Stock __ni_rxmux_init() also programs the receive mux, which the
+	 * speed sequence does not touch:
+	 *   aal_ni_port_rx_ctrl_set(port 0..4, flags 0x30000) sets bit9 and
+	 *     clears bit8 of 0xa5f8 + 0x90 * port;
+	 *   aal_ni_xge_rx_config_set(flags 0x102) sets bit1 and clears bit9 of
+	 *     the P6 XGE receive config at 0xb204.
+	 * Without these the lane links and the MAC has link, but no frame ever
+	 * reaches the QM ring (measured: qm rxcount unchanged, no drops).
+	 */
+	rtl_update(priv, 0xb204, BIT(1) | BIT(9), BIT(1));
+	rtl_update(priv, 0xa5f8 + PORT_STRIDE * 4, BIT(8) | BIT(9), BIT(9));
+	dev_info(priv->netdev->dev.parent,
+		 "P6 rx mux: xge=%08x port4=%08x\n", readl(priv->ni + 0xb204),
+		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4));
 }
 
 /* A 1G peer needs the matching lane load; 2.5G keeps the sgmii_2g5 profile. */
