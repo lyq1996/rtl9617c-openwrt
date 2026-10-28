@@ -528,6 +528,26 @@ static netdev_tx_t rtl_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+/* One decimal/hex token per call. kstrtoul() rejects trailing text, and a
+ * serdes line carries four fields, so the number is copied out first. */
+static bool rtl_p6_next_ul(const char **line, unsigned long *value)
+{
+	const char *token = skip_spaces(*line);
+	size_t length = strcspn(token, " \t");
+	char number[24];
+
+	if (!token || *token == '#' || *token == '\0' || !length ||
+	    length >= sizeof(number))
+		return false;
+	memcpy(number, token, length);
+	number[length] = '\0';
+	if (kstrtoul(number, 0, value))
+		return false;
+	*line = token + length;
+
+	return true;
+}
+
 static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 {
 	size_t size = 0;
@@ -536,7 +556,7 @@ static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 	 * does so when *buf is NULL: an uninitialised pointer is used as the
 	 * read destination and faults inside copy_page_to_iter(). */
 	void *buf = NULL, *end_buf;
-	char *line, *next, *token;
+	char *line, *next;
 	unsigned long offset, value;
 
 	if (profile->status)
@@ -554,19 +574,17 @@ static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 	}
 	end_buf = buf + size;
 	for (line = buf; line < (char *)end_buf; line = next) {
+		const char *cursor;
+
 		next = memchr(line, '\n', (char *)end_buf - line);
 		if (next)
 			*next++ = '\0';
 		else
 			next = end_buf;
-		token = skip_spaces(line);
-		if (*token == '#' || !*token)
+		cursor = line;
+		if (!rtl_p6_next_ul(&cursor, &offset))
 			continue;
-		if (kstrtoul(token, 0, &offset))
-			continue;
-		while (*token && !isspace(*token))
-			token++;
-		if (kstrtoul(skip_spaces(token), 0, &value))
+		if (!rtl_p6_next_ul(&cursor, &value))
 			continue;
 		if (offset < RTL_P6_QX_BASE || offset >= RTL_P6_QX_BASE + 0x1000)
 			continue;
