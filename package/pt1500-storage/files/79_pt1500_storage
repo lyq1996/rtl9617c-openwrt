@@ -8,10 +8,10 @@
 #   rootfs_data   UBIFS; the only writable volume, mounted as /overlay
 #
 # The image boots from the FIT as an initramfs, so / is a RAM copy and OpenWrt
-# deliberately skips mount_root (INITRAMFS=1). Without an overlay every change
-# would be lost on reboot, so this hook creates rootfs_data on first boot and
-# runs mount_root itself. It runs before config_generate, so the generated
-# /etc/board.json and /etc/config/network land in the overlay.
+# deliberately skips mount_root (INITRAMFS=1). This hook therefore does the
+# overlay itself: create rootfs_data on first boot, put a UBIFS on it, mount it
+# at /overlay and stack an overlayfs over / with it as the upper layer. It runs
+# before config_generate, so /etc/board.json and /etc/config land in the flash.
 
 PT1500_FIP_EBS=224		# 27.8 MiB of FIT volume at a 126976-byte LEB
 PT1500_FIP_SLACK=16		# spare LEBs the FIT volume keeps over the image
@@ -58,10 +58,19 @@ pt1500_seed_data() {
 }
 
 pt1500_storage_setup() {
-	local fip data leb avail magic ebs header fit_bytes target
+	local fip data leb avail magic ebs header fit_hex fit_bytes target name
 
-	[ -d /sys/class/ubi/ubi0 ] || return 0
+	# preinit runs before procd's sysfs mount on this board; without it the
+	# UBI class is invisible and the hook would give up without a trace.
+	[ -d /proc/device-tree ] || mount -t proc none /proc 2>/dev/null
+	[ -d /sys/class ] || mount -t sysfs none /sys 2>/dev/null
 	grep -qa youhua,pt1500-h10 /proc/device-tree/compatible || return 0
+	pt1500_log "storage setup"
+
+	if [ ! -d /sys/class/ubi/ubi0 ]; then
+		pt1500_log "no UBI device; nothing to mount"
+		return 0
+	fi
 	pt1500_node ubi0 /dev/ubi0 || {
 		pt1500_log "no UBI control node"
 		return 0
@@ -116,20 +125,41 @@ pt1500_storage_setup() {
 		pt1500_log "no node for $data"
 		return 0
 	}
+	name=$(cat "/sys/class/ubi/$data/name" 2>/dev/null)
 
 	# A first boot interrupted between ubimkvol and the seed write leaves a
-	# volume without a UBIFS superblock; rewrite the seed rather than drop to
-	# a RAM overlay for good.
-	# busybox has hexdump but no od on this image.
+	# volume without a UBIFS superblock; rewrite the seed rather than run
+	# without persistence for good. busybox has hexdump but no od here.
 	magic=$(hexdump -n 4 -v -e '4/1 "%02x"' "/dev/$data" 2>/dev/null)
 	if [ "$magic" != "$PT1500_UBIFS_MAGIC" ]; then
 		pt1500_log "writing UBIFS seed to $data"
 		pt1500_seed_data "$data" || pt1500_log "seed write failed"
 	fi
 
-	grep -q " /overlay " /proc/mounts && return 0
-	pt1500_log "mounting $data as /overlay"
-	/sbin/mount_root start
+	# Already stacked (a second call in the same boot) is a no-op.
+	grep -q '^overlay .* / ' /proc/mounts && return 0
+
+	mkdir -p /overlay
+	if ! grep -q " /overlay " /proc/mounts; then
+		pt1500_log "mounting $data as /overlay"
+		mount -t ubifs "/dev/$data" /overlay || {
+			pt1500_log "UBIFS mount failed"
+			return 1
+		}
+	fi
+	mkdir -p /overlay/upper /overlay/work
+	pt1500_log "stacking overlayfs over / (upper=$name)"
+	if ! mount -t overlay overlay -o "lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work" /; then
+		mkdir -p /mnt/.ovl
+		if mount -t overlay overlay -o "lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work" /mnt/.ovl &&
+		   mount -o move /mnt/.ovl /; then
+			pt1500_log "overlay stacked via move"
+		else
+			pt1500_log "overlayfs mount failed; running from RAM"
+			return 1
+		fi
+	fi
+	pt1500_log "overlay active, / is $(df -h / | tail -1 | tr -s ' ')"
 }
 
 boot_hook_add initramfs pt1500_storage_setup
