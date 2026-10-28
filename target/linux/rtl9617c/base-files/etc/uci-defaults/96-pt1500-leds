@@ -1,0 +1,14 @@
+#!/bin/sh
+# The LED section of /etc/config/system is generated once and then lives in the
+# overlay, so a corrected mapping in board.d/01_leds never reaches a unit that
+# already booted. Point the four panel lamps at the jack each one belongs to:
+# LED_EPHY0 lights the 2.5G jack (lan5), EPHY1..3 the GE jacks (lan2..lan4).
+grep -qa youhua,pt1500-h10 /proc/device-tree/compatible 2>/dev/null || exit 0
+uci -q get system.led_lan0 >/dev/null || exit 0
+
+uci set system.led_lan0.dev='lan5'
+uci set system.led_lan1.dev='lan2'
+uci set system.led_lan2.dev='lan3'
+uci set system.led_lan3.dev='lan4'
+uci commit system
+exit 0

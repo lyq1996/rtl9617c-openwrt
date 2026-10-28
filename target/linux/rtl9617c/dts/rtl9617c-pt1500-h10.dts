@@ -99,9 +99,12 @@
 			gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "usbport";
 		};
+		/* LED_EPHY0 lights the 2.5G jack and behaves active high on this
+		 * board: with ACTIVE_LOW the lamp was lit while the port had no
+		 * link (double inversion), which is why it looked always on. */
 		lan0 {
 			label = "LED_EPHY0";
-			gpios = <&gpio0 4 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
 		};
 		lan1 {
 			label = "LED_EPHY1";
