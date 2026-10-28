@@ -14,6 +14,9 @@ FORCE_UNSAFE_CONFIGURE=1
 export FORCE_UNSAFE_CONFIGURE
 
 rsync -a "$SRC/target/linux/rtl9617c/" "$DST/target/linux/rtl9617c/"
+# base-files must mirror the tree exactly: a leftover preinit script there is
+# sourced by /etc/preinit and can abort the whole preinit chain.
+rsync -a --delete "$SRC/target/linux/rtl9617c/base-files/" "$DST/target/linux/rtl9617c/base-files/"
 mkdir -p "$DST/package/pt1500-storage"
 rsync -a "$SRC/package/pt1500-storage/" "$DST/package/pt1500-storage/"
 cp "$SRC/package/base-files/Makefile" "$DST/package/base-files/Makefile"
@@ -32,6 +35,10 @@ do
 done
 make defconfig >/tmp/pt1500-defconfig.log 2>&1 || { tail -20 /tmp/pt1500-defconfig.log; exit 1; }
 echo CONFIGURED
+
+# Stale rootfs leftovers from earlier experiments: nothing installs them now,
+# and each one costs initramfs space.
+rm -f "$DST/build_dir/target-aarch64_cortex-a55_musl/root-rtl9617c/usr/share/pt1500/rootfs_data.ubifs"
 
 # base-files and the board package are file-only, but their stamps do not
 # watch target/linux/<board>/base-files, so force them.

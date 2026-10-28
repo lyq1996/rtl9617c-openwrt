@@ -210,10 +210,12 @@
 	};
 
 	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, Clause 45 with the
-	 * vendor HiSGMII bring-up (drivers/net/phy/realtek/rtl8221b-tyfza1.h). */
-	phy_2p5g: ethernet-phy@7 {
+	 * vendor HiSGMII bring-up (drivers/net/phy/realtek/rtl8221b-tyfza1.h).
+	 * MDIO address 6: the bus scan reads 0x001cc849 there, while address 7
+	 * (the OEM scfg table entry) answers nothing. */
+	phy_2p5g: ethernet-phy@6 {
 		compatible = "ethernet-phy-ieee802.3-c45";
-		reg = <7>;
+		reg = <6>;
 		realtek,hsgmii;
 	};
 };
