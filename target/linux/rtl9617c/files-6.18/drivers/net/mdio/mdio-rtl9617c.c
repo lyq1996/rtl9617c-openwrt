@@ -216,23 +216,27 @@ static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t count)
 {
 	struct rtl9617c_mdio *mdio = dev_get_drvdata(dev);
-	unsigned long phy = 0, reg = 0, devad = 0, value = 0;
+	unsigned long phy = 0, first = 0, second = 0, third = 0;
 	char op[8] = "";
 	int ret, n;
 
-	n = sscanf(buf, "%7s %li %li %li %li", op, &phy, &reg, &devad, &value);
-	if (n < 3 || phy > 31 || reg > 31 || devad > 31) {
+	n = sscanf(buf, "%7s %li %li %li %li", op, &phy, &first, &second,
+		   &third);
+	/* r/w take a register and an optional value; mr/mw take a device
+	 * address and a register, then an optional value. */
+	if (n < 3 || phy > 31 || first > 31) {
 		mdio->last = 0xdead0000;
 		return count;
 	}
 	if (!strcmp(op, "r")) {
-		ret = rtl_mdio_c22(mdio, phy, reg, 0, true);
-	} else if (!strcmp(op, "w") && n >= 4) {
-		ret = rtl_mdio_c22(mdio, phy, reg, value, false);
-	} else if (!strcmp(op, "mr")) {
-		ret = rtl_mdio_mmd(mdio, phy, devad, reg, 0, true);
-	} else if (!strcmp(op, "mw") && n >= 5) {
-		ret = rtl_mdio_mmd(mdio, phy, devad, reg, value, false);
+		ret = rtl_mdio_c22(mdio, phy, first, 0, true);
+	} else if (!strcmp(op, "w") && n >= 4 && second <= 0xffff) {
+		ret = rtl_mdio_c22(mdio, phy, first, second, false);
+	} else if (!strcmp(op, "mr") && n >= 4 && second <= 0xffff) {
+		ret = rtl_mdio_mmd(mdio, phy, first, second, 0, true);
+	} else if (!strcmp(op, "mw") && n >= 5 && second <= 0xffff &&
+		   third <= 0xffff) {
+		ret = rtl_mdio_mmd(mdio, phy, first, second, third, false);
 	} else {
 		mdio->last = 0xdead0001;
 		return count;
