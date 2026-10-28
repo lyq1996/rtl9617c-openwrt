@@ -9,6 +9,7 @@
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/crc32.h>
+#include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -16,6 +17,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/kernel_read_file.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
@@ -27,6 +29,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/unaligned.h>
 #include <linux/tyfza1-led.h>
+#include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 
 #include "rtl9617c-xram-format.h"
@@ -67,6 +70,24 @@ struct rtl_lan {
 	unsigned int port;
 };
 
+/*
+ * The LAN/uplink lane has its own SerDes block behind an indirect port: write
+ * the value to +0x50, then the command to +0x4c. The stock firmware loads the
+ * whole lane from /etc/serdes/p6_serdes_sgmii_*.txt, one line per (address,
+ * value); without that load the 2.5G jack reports link through the PHY but no
+ * frame ever reaches the MAC.
+ */
+#define RTL_P6_SERDES_BASE	0xf550d000UL
+#define RTL_P6_MAX_WRITES	400
+
+struct rtl_p6_profile {
+	const char *path;
+	unsigned int speed;
+	unsigned int count;
+	int status;			/* 0 unread, 1 ready, <0 failed */
+	u32 word[RTL_P6_MAX_WRITES][2];
+};
+
 struct rtl_xram {
 	/* Primary netdev embeds the shared engine;other LANs only carry this
 	 * initial per-port member and use the same NI/DMA/QM owner. */
@@ -80,6 +101,8 @@ struct rtl_xram {
 	struct device_node *lan4_phy;
 	void __iomem *ni;
 	void __iomem *xram;
+	void __iomem *p6_serdes;
+	struct rtl_p6_profile p6_profile[2];
 	struct phy *sgmii;
 	unsigned int sgmii_speed;
 	struct tyfza1_led phy_led;
@@ -275,6 +298,73 @@ static void rtl_mac_address(struct rtl_xram *priv)
 		   GENMASK(31, 24), (u32)mac[5] << 24);
 }
 
+static int rtl_p6_read(struct rtl_xram *priv, struct rtl_p6_profile *profile)
+{
+	size_t size = 0;
+	ssize_t ret;
+	void *buf, *end_buf;
+	char *line, *next, *token;
+	unsigned long offset, value;
+
+	if (profile->status)
+		return profile->status > 0 ? 0 : profile->status;
+	ret = kernel_read_file_from_path(profile->path, 0, &buf, 0x10000, &size,
+					 READING_UNKNOWN);
+	if (ret < 0) {
+		profile->status = ret;
+		return ret;
+	}
+	end_buf = buf + size;
+	for (line = buf; line < (char *)end_buf; line = next) {
+		next = memchr(line, '\n', (char *)end_buf - line);
+		if (next)
+			*next++ = '\0';
+		else
+			next = end_buf;
+		token = skip_spaces(line);
+		if (*token == '#' || !*token)
+			continue;
+		if (kstrtoul(token, 0, &offset))
+			continue;
+		while (*token && !isspace(*token))
+			token++;
+		if (kstrtoul(skip_spaces(token), 0, &value))
+			continue;
+		if (offset < RTL_P6_SERDES_BASE ||
+		    offset >= RTL_P6_SERDES_BASE + 0x1000)
+			continue;
+		profile->word[profile->count][0] = offset - RTL_P6_SERDES_BASE;
+		profile->word[profile->count][1] = value;
+		if (++profile->count == RTL_P6_MAX_WRITES)
+			break;
+	}
+	vfree(buf);
+	profile->status = 1;
+	return 0;
+}
+
+static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
+{
+	unsigned int i;
+
+	for (i = 0; i < profile->count; i++)
+		writel(profile->word[i][1], priv->p6_serdes + profile->word[i][0]);
+}
+
+static void rtl_p6_configure(struct rtl_xram *priv, unsigned int speed)
+{
+	struct rtl_p6_profile *profile = &priv->p6_profile[speed == SPEED_2500 ? 0 : 1];
+
+	if (!priv->p6_serdes)
+		return;
+	if (rtl_p6_read(priv, profile)) {
+		dev_warn_ratelimited(priv->netdev->dev.parent,
+				     "serdes load %s failed\n", profile->path);
+		return;
+	}
+	rtl_p6_apply(priv, profile);
+}
+
 static void rtl_adjust_link(struct net_device *dev)
 {
 	struct rtl_lan *lan = netdev_priv(dev);
@@ -289,7 +379,10 @@ static void rtl_adjust_link(struct net_device *dev)
 			   BIT(0) | BIT(1), (phy->speed == SPEED_10 ? BIT(0) : 0) |
 			   (phy->duplex == DUPLEX_HALF ? BIT(1) : 0));
 		if (lan->port == 4 && lan->shared->sgmii_speed != phy->speed) {
-			int ret = phy_set_speed(lan->shared->sgmii, phy->speed);
+			int ret;
+
+			rtl_p6_configure(lan->shared, phy->speed);
+			ret = phy_set_speed(lan->shared->sgmii, phy->speed);
 
 			if (ret) {
 				netdev_err(dev, "S3 speed %d failed: %d\n", phy->speed, ret);
@@ -1303,6 +1396,18 @@ static int rtl_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->ni) || IS_ERR(priv->xram)) {
 		ret = IS_ERR(priv->ni) ? PTR_ERR(priv->ni) : PTR_ERR(priv->xram);
 		goto free_netdev;
+	}
+	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
+	priv->p6_profile[0].speed = SPEED_2500;
+	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
+	priv->p6_profile[1].speed = SPEED_1000;
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "p6-serdes")) {
+		priv->p6_serdes = devm_platform_ioremap_resource_byname(pdev,
+								       "p6-serdes");
+		if (IS_ERR(priv->p6_serdes)) {
+			ret = PTR_ERR(priv->p6_serdes);
+			goto free_netdev;
+		}
 	}
 	ret = of_property_read_u32(dev->of_node, "realtek,port", &priv->port);
 	if (ret)
