@@ -667,6 +667,13 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	unsigned int i;
 	u32 value;
 
+	/* The TYFZA1 port of this driver never touches the QX lane: its 2.5G
+	 * jack works through the SGMII PCS alone (pcie-controls phy 5 calls
+	 * rtl_sgmii_link()). Keep our lane load switchable so both paths can
+	 * be compared on hardware without a rebuild. */
+	if (of_property_read_bool(priv->netdev->dev.parent->of_node,
+				  "realtek,p6-bringup-off"))
+		return;
 	if (!priv->p6_serdes || priv->p6_started)
 		return;
 	priv->p6_started = true;
