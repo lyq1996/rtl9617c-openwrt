@@ -638,7 +638,8 @@ static void rtl_p6_mac_config(struct rtl_xram *priv)
 	value = readl(ni + XGE_MISC_CONFIG) & 0xcfffffffU;
 	writel(value | 0x80000000U, ni + XGE_MISC_CONFIG);
 	writel(value | 0xb0000000U, ni + XGE_MISC_CONFIG);
-	mdelay(1);
+	/* __p6_mac_1g_config waits 10 ms here (instructions at 0x19f84). */
+	mdelay(10);
 
 	writel(readl(ni + XGE_MAC_CFG_TX) & ~0x3U, ni + XGE_MAC_CFG_TX);
 	writel(readl(ni + XGE_MAC_CFG_TX) | 1, ni + XGE_MAC_CFG_TX);
