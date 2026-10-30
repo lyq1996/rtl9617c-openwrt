@@ -242,6 +242,20 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 			    ret);
 		ret = 0;
 	}
+	/* The board's own U-Boot driver completes the vendor init with these
+	 * three read-modify-writes after the HiSGMII mode latch: advertise
+	 * 10/100/1000/2500 full duplex (0xa408), select the copper side
+	 * (0xa412) and release 0xa5d4 bit7. Without them the mode registers
+	 * read back correctly but the line side never carries frames. */
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa408, 0x1e0, 0x140);
+	if (ret < 0)
+		goto error;
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa412, 0x300, 0x200);
+	if (ret < 0)
+		goto error;
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa5d4, 0, BIT(7));
+	if (ret < 0)
+		goto error;
 	return 0;
 error:
 	phydev_err(phydev, "TYFZA1 cold initialization failed: %d\n", ret);
