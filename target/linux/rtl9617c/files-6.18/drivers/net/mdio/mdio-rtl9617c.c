@@ -200,6 +200,7 @@ static int rtl_mdio_mmd(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
  *   r  <phy> <reg>                    Clause 22 read
  *   mw <phy> <devad> <reg> <value>    indirect MMD write
  *   mr <phy> <devad> <reg>            indirect MMD read
+ *   cr <phy> <devad> <reg>            direct Clause 45 read
  *
  * The result of the last command is printed when the file is read.
  */
@@ -234,6 +235,8 @@ static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
 		ret = rtl_mdio_c22(mdio, phy, first, second, false);
 	} else if (!strcmp(op, "mr") && n >= 4 && second <= 0xffff) {
 		ret = rtl_mdio_mmd(mdio, phy, first, second, 0, true);
+	} else if (!strcmp(op, "cr") && n >= 4 && second <= 0xffff) {
+		ret = rtl_mdio_c45_xfer(mdio, phy, first, second, 0, true);
 	} else if (!strcmp(op, "mw") && n >= 5 && second <= 0xffff &&
 		   third <= 0xffff) {
 		ret = rtl_mdio_mmd(mdio, phy, first, second, third, false);
