@@ -173,6 +173,24 @@ static int rtl8221b_hsgmii(struct phy_device *phydev)
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f11, 0x8020);
 	if (ret < 0)
 		return ret;
+	/* Measured on the unit: the force-down ACK only appears when 0x6f10
+	 * and 0x6f11 already hold the HSGMII values. At probe they are written
+	 * while the part is still settling and read back as their power-on
+	 * values (0x084a / 0x0021), which is why every boot ended in the
+	 * "ACK absent" path. Verify and retry before asking for the ACK. */
+	for (ret = 0; ret < 3; ret++) {
+		int f10 = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f10);
+		int f11 = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f11);
+
+		if (f10 == 0xd433 && (f11 & 0xffff) == 0x8020)
+			break;
+		if (f10 >= 0 && (f10 & 0xffff) != 0xd433)
+			phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f10, 0xd433);
+		if (f11 >= 0 && (f11 & 0xffff) != 0x8020)
+			phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f11, 0x8020);
+		usleep_range(1000, 2000);
+	}
+
 	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa400, 0, BIT(14));
 	if (ret < 0)
 		return ret;

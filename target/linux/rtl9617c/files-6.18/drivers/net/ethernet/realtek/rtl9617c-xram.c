@@ -739,6 +739,10 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 		rtl_p6_apply(priv, profile);
 	rtl_p6_mode_word(priv, speed == SPEED_2500 ? RTL_P6_MODE_SGMII_2G5 :
 			 RTL_P6_MODE_SGMII_1G);
+	/* The MAC is programmed once at engine start, before the lane has a
+	 * peer. Re-arm it whenever the link changes speed so the receive path
+	 * is re-initialised after the PHY switched its line side. */
+	rtl_p6_mac_config(priv);
 }
 
 static int rtl_engine_start(struct rtl_xram *priv)
