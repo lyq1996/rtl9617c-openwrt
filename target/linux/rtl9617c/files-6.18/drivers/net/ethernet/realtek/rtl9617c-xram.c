@@ -117,6 +117,8 @@ struct rtl_xram {
 	void __iomem *ni;
 	void __iomem *xram;
 	void __iomem *p6_serdes;
+	void __iomem *p6_pcs;
+	void __iomem *ccu;
 	struct rtl_p6_profile p6_profile[2];
 	bool p6_started;
 	struct phy *sgmii;
@@ -136,6 +138,7 @@ struct rtl_xram {
 	u32 port;
 	u32 qx_last;
 	u32 ni_last;
+	u32 hw_last[2];
 	bool tx_pending;
 	unsigned int tx_length;
 	u8 tx_buffer[2048];
@@ -1473,6 +1476,57 @@ static ssize_t ni_reg_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RW(ni_reg);
 
+/*
+ * Bring-up poke for the windows that have no driver of their own yet:
+ *   pcs <off> / pcs w <off> <val>   P6 PCS (0xf430b000)
+ *   ccu <off> / ccu w <off> <val>   clock control unit (0xf4320000)
+ */
+static ssize_t hw_reg_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+
+	return sysfs_emit(buf, "pcs=%08x ccu=%08x\n", priv->hw_last[0],
+			  priv->hw_last[1]);
+}
+
+static ssize_t hw_reg_store(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct rtl_xram *priv = netdev_priv(netdev);
+	char win[8] = "", op[8] = "";
+	unsigned long offset = 0, value = 0;
+	void __iomem *base;
+	int n, slot;
+
+	n = sscanf(buf, "%7s %7s %li %li", win, op, &offset, &value);
+	if (n < 2 || offset >= 0x1000)
+		return count;
+	if (!strcmp(win, "pcs")) {
+		base = priv->p6_pcs;
+		slot = 0;
+	} else if (!strcmp(win, "ccu")) {
+		base = priv->ccu;
+		slot = 1;
+	} else {
+		return count;
+	}
+	if (!base)
+		return count;
+	if (!strcmp(op, "w") && n >= 4) {
+		writel(value, base + offset);
+		priv->hw_last[slot] = readl(base + offset);
+	} else {
+		priv->hw_last[slot] = readl(base + offset);
+	}
+	dev_info(dev, "hw %s %lx = %08x\n", win, offset, priv->hw_last[slot]);
+
+	return count;
+}
+static DEVICE_ATTR_RW(hw_reg);
+
 static ssize_t dma_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
@@ -1652,6 +1706,7 @@ static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_ports_state.attr,
 	&dev_attr_qx_reg.attr,
 	&dev_attr_ni_reg.attr,
+	&dev_attr_hw_reg.attr,
 	&dev_attr_dma_state.attr,
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
@@ -1714,6 +1769,10 @@ static int rtl_probe(struct platform_device *pdev)
 	priv->p6_profile[0].speed = SPEED_2500;
 	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
 	priv->p6_profile[1].speed = SPEED_1000;
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "p6-pcs"))
+		priv->p6_pcs = devm_platform_ioremap_resource_byname(pdev, "p6-pcs");
+	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "ccu"))
+		priv->ccu = devm_platform_ioremap_resource_byname(pdev, "ccu");
 	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "p6-serdes")) {
 		priv->p6_serdes = devm_platform_ioremap_resource_byname(pdev,
 								       "p6-serdes");
