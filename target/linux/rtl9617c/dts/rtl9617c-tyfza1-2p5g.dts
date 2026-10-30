@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original conf-0/fdt@0, verified against the 2.5G board's running FDT.
+/dts-v1/;
+
+#include "rtl9617c-tyfza1.dtsi"
+
 / {
 	model = "Tianyi TYFZA1 (RTL9617C, 2.5G LAN)";
-	compatible = "tianyi,tyfza1-2p5g", "tianyi,tyfza1", "realtek,rtl9617c";
+	compatible = "tianyi,tyfza1-2p5g", "realtek,rtl9617c";
 
 	leds {
 		/delete-node/ usb0;

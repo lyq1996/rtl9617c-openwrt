@@ -1,0 +1,102 @@
+#!/bin/sh /etc/rc.common
+
+START=09
+
+factory_read() {
+	dd if="$factory_volume" bs=1 skip=$1 count=$2 2>/dev/null
+}
+
+factory_mac() {
+	factory_read $1 6 | hexdump -v -e '1/1 "%02x"'
+}
+
+factory_blob() {
+	local tmp
+	tmp=$(mktemp)
+	dd if="$factory_volume" of="$tmp" bs=1 skip=$1 count=$2 2>/dev/null
+	if [ -s "$tmp" ] && [ -n "$(tr -d '\377' < "$tmp")" ]; then
+		chmod 0644 "$tmp"
+		mv "$tmp" "$2"
+	else
+		rm -f "$tmp"
+		return 1
+	fi
+}
+
+start() {
+	local runtime=/tmp/tyfza1-factory
+	local runstate=/var/run/tyfza1-factory
+	local factory_volume=
+	local device base_mac epon_mac serial pon_factory
+
+	rm -rf "$runtime" "$runstate"
+	if [ ! -d /sys/class/ubi/ubi0 ]; then
+		for device in /sys/class/mtd/mtd*/name; do
+			[ "$(cat "$device")" = ubi_device ] || continue
+			ubiattach /dev/ubi_ctrl -m "${device##*mtd}"
+			break
+		done
+	fi
+	if [ ! -d /sys/class/ubi/ubi0 ]; then
+		logger -t tyfza1-factory "UBI device is not attached"
+		return 1
+	fi
+	for device in /sys/class/ubi/ubi0_*/name; do
+		[ "$(cat "$device")" = factory ] || continue
+		device=${device%/name}
+		factory_volume=/dev/${device##*/}
+		break
+	done
+	if [ ! -c "$factory_volume" ]; then
+		logger -t tyfza1-factory "factory volume is missing"
+		return 1
+	fi
+	if [ "$(factory_read 0 8)" != RTLFACT1 ]; then
+		logger -t tyfza1-factory "factory volume has a bad magic"
+		return 1
+	fi
+
+	mkdir -p "$runtime/rtl9617c" \
+		"$runtime/tyfza1/rtl8852ce" "$runtime/tyfza1/rtl8192xbe"
+
+	base_mac=$(factory_mac $((0x1000)))
+	if [ "${#base_mac}" = 12 ] && [ "$base_mac" != ffffffffffff ]; then
+		printf '%s\n' "$base_mac" | sed 's/../&:/g; s/:$//' > "$runtime/lan_mac"
+	fi
+
+	factory_blob $((0x2000)) 4096 "$runtime/tyfza1/rtl8852ce/flash-calibration.bin"
+	factory_blob $((0x3000)) 4096 "$runtime/tyfza1/rtl8192xbe/flash-calibration.bin"
+	factory_blob $((0x4000)) 1024 "$runtime/rtl9617c/bosa-calibration.bin"
+
+	serial=$(factory_read $((0x1020)) 16 | tr -d '\000\377')
+	epon_mac=$(factory_mac $((0x1010)))
+	if [ "${#epon_mac}" != 12 ] || [ "$epon_mac" = ffffffffffff ]; then
+		epon_mac=
+	else
+		epon_mac=$(printf '%s\n' "$epon_mac" | sed 's/../&:/g; s/:$//')
+	fi
+
+	mkdir -p "$runstate"
+	chmod 0700 "$runstate"
+	if [ -n "$serial" ] || [ -n "$epon_mac" ]; then
+		pon_factory="$runstate/pon_factory"
+		echo "config pon 'pon'" > "$pon_factory"
+		[ -n "$serial" ] && \
+			echo "	option serial_number '$serial'" >> "$pon_factory"
+		[ -n "$epon_mac" ] && \
+			echo "	option onu_mac '$epon_mac'" >> "$pon_factory"
+		chmod 0600 "$pon_factory"
+	fi
+
+	if [ -f "$runtime/lan_mac" ]; then
+		read -r base_mac < "$runtime/lan_mac"
+		for device in /sys/class/net/lan[1-5]; do
+			[ -e "$device" ] || continue
+			ip link set dev "${device##*/}" address "$base_mac" || return $?
+		done
+		device=/sys/bus/platform/devices/4f5500000.pon
+		if [ -d "$device" ]; then
+			cat "$runtime/lan_mac" > "$device/data_mac" || return $?
+		fi
+	fi
+}
