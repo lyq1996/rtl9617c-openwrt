@@ -181,11 +181,13 @@ static int rtl_pcie_lane_speed(struct phy *phy, int speed)
 	/* Bring-up visibility: the analog bank and the SGMII PCS must both end
 	 * up programmed for the requested speed. b404/b428 are written by the
 	 * stock __p4_sds_2g5_patch(), d4 holds the SGMII PCS control word. */
-	pr_info("S3 speed %d: ctrl=%08x reset=%08x pcs=%08x ana404=%08x ana428=%08x\n",
+	pr_info("S3 speed %d: ctrl=%08x reset=%08x pcs=%08x ana404=%08x ana428=%08x status=%08x misc=%08x\n",
 		speed, readl(controls->phy_control), readl(controls->phy_reset),
 		readl(controls->phy_control + 0x10),
 		readl(controls->sgmii_analog + 0x404),
-		readl(controls->sgmii_analog + 0x428));
+		readl(controls->sgmii_analog + 0x428),
+		readl(controls->phy_control + 0x08),
+		readl(controls->phy_control + 0x0c));
 	return 0;
 }
 static const struct phy_ops rtl_pcie_phy_ops = {
