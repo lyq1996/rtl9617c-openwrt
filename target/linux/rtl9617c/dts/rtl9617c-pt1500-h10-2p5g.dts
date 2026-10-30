@@ -332,10 +332,9 @@
 		reg = <4 0xf4300000 0 0x10000>, <0 0xf4500000 0 0x2000>,
 		      <4 0xf7001000 0 0x1000>, <4 0xf432d000 0 0x1000>,
 		      <4 0xf4320098 0 4>, <4 0xf432f000 0 0x1000>,
-		      <4 0xf550d000 0 0x1000>, <4 0xf430b000 0 0x1000>,
-		      <4 0xf4320000 0 0x1000>;
+		      <4 0xf550d000 0 0x1000>;
 		reg-names = "ni", "xram", "dma-lso", "qm-axi-reorder", "block-reset",
-			    "l3fe-axi-reorder", "p6-serdes", "p6-pcs", "ccu";
+			    "l3fe-axi-reorder", "p6-serdes";
 		/* DMA TX is not optional on a multi-port board: the management
 		 * XRAM path programs GLB_STATIC.PORT_TO_CPU with priv->port, so
 		 * only port 0 is bridged to the CPU and every other port both
