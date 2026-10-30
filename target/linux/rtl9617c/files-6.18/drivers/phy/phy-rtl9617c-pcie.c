@@ -188,6 +188,12 @@ static int rtl_pcie_lane_speed(struct phy *phy, int speed)
 		readl(controls->sgmii_analog + 0x428),
 		readl(controls->phy_control + 0x08),
 		readl(controls->phy_control + 0x0c));
+	/* The PLL may need a little time; the first read is taken right after
+	 * the PCS write. Read it again once the lane has had time to lock. */
+	mdelay(100);
+	pr_info("S3 settle: status=%08x misc=%08x\n",
+		readl(controls->phy_control + 0x08),
+		readl(controls->phy_control + 0x0c));
 	return 0;
 }
 static const struct phy_ops rtl_pcie_phy_ops = {
