@@ -301,7 +301,7 @@
 	pcie_controls: pcie-controls@f4320098 {
 		compatible = "realtek,rtl9617c-pcie-controls";
 		reg = <0 0xf4320098 0 4>, <0 0xf43200a0 0 4>,
-		      <0 0xf43200c4 0 0x14>, <0 0xf432036c 0 4>, <0 0xf432009c 0 4>,
+		      <0 0xf43200c4 0 0x20>, <0 0xf432036c 0 4>, <0 0xf432009c 0 4>,
 		      <4 0xf433b000 0 0x1000>, <0 0xf4600000 0 0x1000>;
 		reg-names = "core-reset", "phy-reset", "phy-control", "power", "usb-reset",
 			    "sgmii-analog", "sgmii-serdes";
