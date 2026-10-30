@@ -24,7 +24,7 @@ Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
 +		.config_aneg	= rtl822x_c45_config_aneg,
 +		.read_status	= rtl822x_c45_read_status,
 +		.suspend	= genphy_c45_pma_suspend,
-+		.resume		= rtlgen_c45_resume,
++		.resume		= rtl8221b_tyfza1_resume,
 +		.read_mmd	= rtl822xb_read_mmd,
 +		.write_mmd	= rtl822xb_write_mmd,
 +	},

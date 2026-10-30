@@ -209,6 +209,35 @@ static int rtl8221b_hsgmii(struct phy_device *phydev)
 	return ret < 0 ? ret : release;
 }
 
+/* Vendor finish that must run after the PHY is powered and before autoneg.
+ * phylib issues suspend/resume between config_init and config_aneg, and the
+ * resume path overwrites these registers, so they cannot live only in
+ * config_init (measured: 0xa408/0xa412 read back at their defaults). */
+static int rtl8221b_tyfza1_finish(struct phy_device *phydev)
+{
+	int ret;
+
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa408, 0x1e0, 0x140);
+	if (ret < 0)
+		return ret;
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa412, 0x300, 0x200);
+	if (ret < 0)
+		return ret;
+	return rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa5d4, 0, BIT(7));
+}
+
+static int rtl8221b_tyfza1_resume(struct phy_device *phydev)
+{
+	int ret = rtlgen_c45_resume(phydev);
+
+	if (ret < 0)
+		return ret;
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,hsgmii-init-off"))
+		return 0;
+	return rtl8221b_tyfza1_finish(phydev);
+}
+
 static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 {
 	int ret;
@@ -242,21 +271,8 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 			    ret);
 		ret = 0;
 	}
-	/* The board's own U-Boot driver completes the vendor init with these
-	 * three read-modify-writes after the HiSGMII mode latch: advertise
-	 * 10/100/1000/2500 full duplex (0xa408), select the copper side
-	 * (0xa412) and release 0xa5d4 bit7. Without them the mode registers
-	 * read back correctly but the line side never carries frames. */
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa408, 0x1e0, 0x140);
-	if (ret < 0)
-		goto error;
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa412, 0x300, 0x200);
-	if (ret < 0)
-		goto error;
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa5d4, 0, BIT(7));
-	if (ret < 0)
-		goto error;
-	return 0;
+	/* Also applied again from resume, after phylib powers the part up. */
+	return rtl8221b_tyfza1_finish(phydev);
 error:
 	phydev_err(phydev, "TYFZA1 cold initialization failed: %d\n", ret);
 	return ret;
