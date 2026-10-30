@@ -33,6 +33,14 @@ do
 		echo "CONFIG_PACKAGE_$sym=y" >> .config
 	fi
 done
+# Upstream renamed the board to youhua_pt1500_h10_2p5g and now ships a FIT
+# with a squashfs root (sysupgrade.itb) plus a recovery initramfs; make the
+# build tree select that device instead of the removed youhua_pt1500_h10.
+sed -i '/^CONFIG_TARGET_rtl9617c_generic_DEVICE_youhua_pt1500_h10=y$/d' .config
+sed -i '/^CONFIG_TARGET_PROFILE="DEVICE_youhua_pt1500_h10"$/d' .config
+grep -q '^CONFIG_TARGET_rtl9617c_generic_DEVICE_youhua_pt1500_h10_2p5g=y$' .config ||
+	echo 'CONFIG_TARGET_rtl9617c_generic_DEVICE_youhua_pt1500_h10_2p5g=y' >> .config
+
 make defconfig >/tmp/pt1500-defconfig.log 2>&1 || { tail -20 /tmp/pt1500-defconfig.log; exit 1; }
 echo CONFIGURED
 
@@ -44,4 +52,5 @@ rm -f "$DST/build_dir/target-aarch64_cortex-a55_musl/root-rtl9617c/usr/share/pt1
 # watch target/linux/<board>/base-files, so force them.
 make package/base-files/clean package/pt1500-storage/clean >/dev/null 2>&1 || true
 make -j"$(nproc)" > "$DST/pt1500-build.log" 2>&1
-echo "BUILD OK: $(ls "$DST"/bin/targets/rtl9617c/generic/*fip.itb)"
+echo "BUILD OK:"
+ls -l --block-size=K "$DST"/bin/targets/rtl9617c/generic/*.itb 2>/dev/null
