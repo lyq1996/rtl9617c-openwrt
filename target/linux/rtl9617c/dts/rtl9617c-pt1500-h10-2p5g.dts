@@ -274,12 +274,12 @@
 		reg = <4>;
 	};
 
-	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, address 6. It is a
-	 * Clause 22 device on this board: the bus answers 0x001cc849 there while
-	 * every Clause 45 read comes back as 0xffff, so a C45 node leaves phylib
-	 * with phy_id 0 and the vendor HiSGMII bring-up never runs. The vendor
-	 * header reads its registers through indirect MMD on top of C22. */
+	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, address 6. Native
+	 * Clause 45 access works at this address (PMAPMD ID 0x001cc849), and is
+	 * the path used by the working TYFZA1 reference for the vendor HSGMII
+	 * bring-up. Address 7 is not populated on this board. */
 	phy_2p5g: ethernet-phy@6 {
+		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <6>;
 		/* Vendor HiSGMII bring-up: the 2.5G jack only passes frames once
 		 * the PHY's line side is put in HSGMII mode. */
