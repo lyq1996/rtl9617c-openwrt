@@ -41,6 +41,10 @@ sed -i '/^CONFIG_TARGET_PROFILE="DEVICE_youhua_pt1500_h10"$/d' .config
 grep -q '^CONFIG_TARGET_rtl9617c_generic_DEVICE_youhua_pt1500_h10_2p5g=y$' .config ||
 	echo 'CONFIG_TARGET_rtl9617c_generic_DEVICE_youhua_pt1500_h10_2p5g=y' >> .config
 
+# uboot-envtools' host fw_printenv is not built for this target and fails
+# world; the fip/fit slot switch is done over the serial console instead.
+sed -i 's|^CONFIG_PACKAGE_uboot-envtools=y|# CONFIG_PACKAGE_uboot-envtools is not set|' .config
+
 make defconfig >/tmp/pt1500-defconfig.log 2>&1 || { tail -20 /tmp/pt1500-defconfig.log; exit 1; }
 echo CONFIGURED
 
