@@ -216,8 +216,14 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 	if (ret < 0)
 		goto error;
 	ret = rtl8221b_hsgmii(phydev);
-	if (ret < 0)
-		goto error;
+	if (ret < 0) {
+		/* Do not hand -ETIMEDOUT to phylib here: phy_error() parks the
+		 * PHY and every later carrier/speed read fails with EINVAL, which
+		 * costs the whole port. Keep the failure visible but continue. */
+		phydev_warn(phydev, "HiSGMII bring-up incomplete (%d), continuing\n",
+			    ret);
+		ret = 0;
+	}
 	return 0;
 error:
 	phydev_err(phydev, "TYFZA1 cold initialization failed: %d\n", ret);
