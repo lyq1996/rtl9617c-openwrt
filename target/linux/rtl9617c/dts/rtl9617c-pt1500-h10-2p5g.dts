@@ -274,12 +274,14 @@
 		reg = <4>;
 	};
 
-	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, address 6. Native
-	 * Clause 45 access works at this address (PMAPMD ID 0x001cc849), and is
-	 * the path used by the working TYFZA1 reference for the vendor HSGMII
-	 * bring-up. Address 7 is not populated on this board. */
+	/* 2.5G jack: RTL8221B behind the Taurus SGMII lane, address 6.
+	 * Clause 45 framing reads the ID here but does not agree with the
+	 * indirect MMD view of the vendor registers (measured: 0xa412 reads
+	 * 0x0200 through C45 and 0x521a through C22 at the same moment), so
+	 * every vendor write through the C45 path landed in the wrong place
+	 * and the HiSGMII init never took effect. Stay on Clause 22 and let
+	 * phylib use the indirect 0x0d/0x0e MMD registers. */
 	phy_2p5g: ethernet-phy@6 {
-		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <6>;
 		/* Vendor HiSGMII bring-up: the 2.5G jack only passes frames once
 		 * the PHY's line side is put in HSGMII mode. */
