@@ -741,6 +741,13 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 {
 	struct rtl_p6_profile *profile = &priv->p6_profile[speed == SPEED_2500 ? 0 : 1];
 
+	/* p6-bringup-off must disable the whole P6 path, including the link
+	 * callback. The PT1500 uses the reference NI4/S3 SGMII path; writing
+	 * the QX table and rearming the XGE MAC here happens after the copper
+	 * link is already up and breaks its receive side. */
+	if (of_property_read_bool(priv->netdev->dev.parent->of_node,
+				  "realtek,p6-bringup-off"))
+		return;
 	if (!priv->p6_serdes)
 		return;
 	if (!rtl_p6_read(priv, profile) && profile->count)
