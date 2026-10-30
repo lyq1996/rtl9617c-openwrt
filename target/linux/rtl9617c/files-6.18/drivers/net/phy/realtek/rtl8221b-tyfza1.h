@@ -238,6 +238,20 @@ static int rtl8221b_tyfza1_resume(struct phy_device *phydev)
 	return rtl8221b_tyfza1_finish(phydev);
 }
 
+static int rtl8221b_tyfza1_config_aneg(struct phy_device *phydev)
+{
+	/* config_aneg is called after config_init and before every autoneg
+	 * restart, regardless of whether the PHY went through suspend/resume. */
+	if (!of_property_read_bool(phydev->mdio.dev.of_node,
+				   "realtek,hsgmii-init-off")) {
+		int ret = rtl8221b_tyfza1_finish(phydev);
+
+		if (ret < 0)
+			return ret;
+	}
+	return rtl822x_c45_config_aneg(phydev);
+}
+
 static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 {
 	int ret;

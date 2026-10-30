@@ -21,7 +21,7 @@ Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
 +		.name		= "TYFZA1 RTL8221B HiSGMII PHY",
 +		.get_features	= rtl8221b_tyfza1_get_features,
 +		.config_init	= rtl8221b_tyfza1_config_init,
-+		.config_aneg	= rtl822x_c45_config_aneg,
++		.config_aneg	= rtl8221b_tyfza1_config_aneg,
 +		.read_status	= rtl822x_c45_read_status,
 +		.suspend	= genphy_c45_pma_suspend,
 +		.resume		= rtl8221b_tyfza1_resume,
