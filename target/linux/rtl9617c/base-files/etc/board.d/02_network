@@ -5,7 +5,7 @@
 board_config_update
 
 case "$(board_name)" in
-youhua,pt1500-h10)
+youhua,pt1500-h10|youhua,pt1500-h10-2p5g)
 	# No switch: every jack is its own NI MAC port with its own PHY, and
 	# the NIC registers one netdev per port that has a PHY (lan1..lan4 for
 	# NI port 0..3 on the RTL8211 GE PHYs, lan5 for NI port 4 on the

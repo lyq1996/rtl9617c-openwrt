@@ -9,7 +9,7 @@
 
 platform_check_image() {
 	case "$(board_name)" in
-	youhua,pt1500-h10) ;;
+	youhua,pt1500-h10|youhua,pt1500-h10-2p5g) ;;
 	*)
 		echo "this image is for youhua,pt1500-h10, not $(board_name)" >&2
 		return 1

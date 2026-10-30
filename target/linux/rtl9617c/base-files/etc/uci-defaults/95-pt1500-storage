@@ -6,7 +6,7 @@
 # that still carries anon_mount=1.
 
 case "$(board_name)" in
-youhua,pt1500-h10) ;;
+youhua,pt1500-h10|youhua,pt1500-h10-2p5g) ;;
 *) exit 0 ;;
 esac
 

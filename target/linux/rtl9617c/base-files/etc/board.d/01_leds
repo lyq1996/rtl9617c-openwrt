@@ -5,7 +5,7 @@
 
 board_config_update
 case "$(board_name)" in
-	youhua,pt1500-h10)
+	youhua,pt1500-h10|youhua,pt1500-h10-2p5g)
 		# Four jacks: LED_EPHY0 lights the 2.5G jack (NI port 4 = lan5),
 		# LED_EPHY1..3 the three GE jacks (NI port 1..3 = lan2..lan4).
 		# The OEM numbers the jacks eth0.2..eth0.5 and reorders them with
