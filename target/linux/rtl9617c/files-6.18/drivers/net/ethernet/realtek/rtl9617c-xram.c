@@ -1698,6 +1698,7 @@ static int rtl_probe(struct platform_device *pdev)
 	priv = netdev_priv(netdev);
 	priv->lan.shared = priv;
 	priv->netdev = netdev;
+	dev_info(&pdev->dev, "PT1500 build r4: PHY tolerant, lane released\n");
 	priv->ni = devm_platform_ioremap_resource(pdev, 0);
 	priv->xram = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(priv->ni) || IS_ERR(priv->xram)) {
