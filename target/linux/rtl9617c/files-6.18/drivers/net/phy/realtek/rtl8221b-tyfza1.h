@@ -240,10 +240,16 @@ static int rtl8221b_tyfza1_resume(struct phy_device *phydev)
 
 static int rtl8221b_tyfza1_config_aneg(struct phy_device *phydev)
 {
-	/* config_aneg is called after config_init and before every autoneg
-	 * restart, regardless of whether the PHY went through suspend/resume. */
-	if (!of_property_read_bool(phydev->mdio.dev.of_node,
-				   "realtek,hsgmii-init-off")) {
+	/* Pt1500 golden state: leave the PHY exactly as it comes out of reset.
+	 * The vendor aneg path writes the 2.5G mode words and takes the line
+	 * side out of the stock state (measured 0x6f10 0x084a -> 0x086a and
+	 * 0x758d link bit clear). */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,hsgmii-init-off"))
+		return 0;
+	/* config_aneg runs after config_init and before every autoneg restart,
+	 * regardless of whether the PHY went through suspend/resume. */
+	{
 		int ret = rtl8221b_tyfza1_finish(phydev);
 
 		if (ret < 0)
