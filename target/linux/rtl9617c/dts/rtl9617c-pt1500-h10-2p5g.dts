@@ -283,9 +283,13 @@
 	 * phylib use the indirect 0x0d/0x0e MMD registers. */
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
-		/* Vendor HiSGMII bring-up: the 2.5G jack only passes frames once
-		 * the PHY's line side is put in HSGMII mode. */
-		realtek,hsgmii;
+		/* PT1500 uses the RTL8221B variant whose vendor init is skipped by
+		 * the stock driver: the golden state on a working unit is the
+		 * power-on 0x6f10=0x084a / 0x6f11=0x0021 with 0xa400=0x1040 and
+		 * 0xa434 bit2 set. The TYFZA1 HiSGMII force-down sequence writes
+		 * 0xd433 and leaves the line side down (0x758d bit1=0), which is
+		 * exactly why this port received nothing. Keep the PHY untouched. */
+		realtek,hsgmii-init-off;
 	};
 };
 
