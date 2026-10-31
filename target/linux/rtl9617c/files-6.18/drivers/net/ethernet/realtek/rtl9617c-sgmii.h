@@ -22,7 +22,7 @@ static inline void rtl_sgmii_link(void __iomem *control, void __iomem *reset,
 	unsigned int bank = speed == 2500 ? 0x400 : 0x200, i;
 	u32 value = readl(control);
 
-	writel(value & ~(3U << 25), control);
+	writel(value & ~(BIT(24) | (3U << 25)), control);
 	value = readl(reset);
 	writel(value | BIT(5) | BIT(8), reset);
 	udelay(10);
@@ -33,7 +33,7 @@ static inline void rtl_sgmii_link(void __iomem *control, void __iomem *reset,
 		writel((readl(analog + bank + regs[i]) & ~masks[i]) | value,
 		       analog + bank + regs[i]);
 	}
-	writel((readl(control) & ~(3U << 25)) |
+	writel((readl(control) & ~(BIT(24) | (3U << 25))) |
 	       (speed == 2500 ? 2U : 1U) << 25, control);
 	writel(rtl_sgmii_pcs(readl(pcs), speed), pcs);
 }

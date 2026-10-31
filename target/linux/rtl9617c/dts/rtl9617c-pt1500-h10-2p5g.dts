@@ -358,7 +358,6 @@
 		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4 &phy_2p5g>;
 		phys = <&pcie_controls 5>;
 		phy-names = "sgmii";
-		realtek,p6-bringup-off;
 		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
 	};
 

@@ -82,7 +82,7 @@ struct rtl_lan {
 #define RTL_P6_QX_BASE		0xf550d000UL
 #define RTL_P6_MAX_WRITES	400
 #define RTL_P6_MODE_SGMII_1G	0x4cf6
-#define RTL_P6_MODE_SGMII_2G5	0x4cf5
+#define RTL_P6_MODE_SGMII_2G5	0x5cf5
 #define RTL_P6_CLOCK_BIT	BIT(13)		/* QX_SDS_STATE ready */
 #define RTL_P6_CLOCK_TRIES	1501
 #define RTL_P6_CLOCK_STEP_MS	10
@@ -678,12 +678,13 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		return;
 	priv->p6_started = true;
 
-	/* GLOBAL_BLOCK_RESET bit31 pulses the shared SerDes logic. */
+	/* Stock leaves GLOBAL_BLOCK_RESET at 0x102001c0 (bits 6..8, 21, 28
+	 * set) while the QX lane is alive. Our bootloader leaves 0x8f, which
+	 * keeps the P6/QX block clock-gated. Preserve our low lane-reset bits
+	 * and add the stock block bits. */
 	if (priv->qm.block_reset) {
 		value = readl(priv->qm.block_reset);
-		writel(value | BIT(31), priv->qm.block_reset);
-		udelay(1);
-		writel(value & ~BIT(31), priv->qm.block_reset);
+		writel(value | 0x102001c0U, priv->qm.block_reset);
 	}
 
 	/* Power the QX lane and select the SGMII 2.5G interface mode. */
@@ -1724,7 +1725,7 @@ static int rtl_probe(struct platform_device *pdev)
 		ret = IS_ERR(priv->ni) ? PTR_ERR(priv->ni) : PTR_ERR(priv->xram);
 		goto free_netdev;
 	}
-	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
+	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_qxgmii_2g5.txt";
 	priv->p6_profile[0].speed = SPEED_2500;
 	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
 	priv->p6_profile[1].speed = SPEED_1000;
