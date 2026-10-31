@@ -358,10 +358,27 @@
 		// engine and port 4 is the SGMII lane that carries the 2.5G PHY.
 		// NI port n (n < 4) carries external PHY n+1, which is the OEM's
 		// MAC port n.
+		//
+		// lan-phys must have an entry for every index the driver walks
+		// (it loops port < 5 and reads lan-phys[port] for port != 0). The
+		// list used to hold only four phandles, so port 4 resolved to
+		// NULL, was skipped as "has no realtek,lan-phys", and therefore
+		// rtl_register_lan() never ran for it. That is what kept the
+		// SGMII PCS unpowered and rtl_sgmii_link() -- whose 2500 branch
+		// programs the analog bank at 0x400 -- from ever being called.
+		// The sibling TYFZA1 board lists five entries for exactly this
+		// reason. Index 4 repeats the 2.5G PHY so port 4 comes up on the
+		// SGMII lane, matching that working configuration.
 		realtek,port = <0>;
 		phy-handle = <&phy1>;
-		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4>;
-		realtek,p6-phy = <&phy_2p5g>;
+		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4 &phy_2p5g>;
+		/* The 2.5G jack is carried by the SGMII PCS on port 4, not by
+		 * the P6 XGE MAC: with the P6 path enabled every one of the 64
+		 * XGE MAC MIB counters stayed at zero, including under a
+		 * MAC-internal TX->RX loopback, so nothing ever reaches that
+		 * MAC. Leave it off and drive the lane the way the working
+		 * TYFZA1 board does. */
+		realtek,p6-bringup-off;
 		phys = <&pcie_controls 5>;
 		phy-names = "sgmii";
 		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
