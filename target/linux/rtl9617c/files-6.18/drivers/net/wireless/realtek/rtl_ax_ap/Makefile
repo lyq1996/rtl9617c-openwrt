@@ -7,6 +7,6 @@ ccflags-y += -fcaller-saves
 # tx.c includes the PE program built from target/linux/rtl9617c/pe.
 ifneq ($(filter y m,$(CONFIG_RTL_AX_AP)),)
 ifeq ($(wildcard $(srctree)/$(src)/pe-tx-code.h),)
-$(error pe-tx-code.h is missing; run "make -C target/linux/rtl9617c/pe"
+$(error pe-tx-code.h is missing; run "make -C target/linux/rtl9617c/pe")
 endif
 endif

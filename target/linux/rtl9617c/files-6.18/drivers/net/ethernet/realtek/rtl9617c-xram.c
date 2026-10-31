@@ -82,7 +82,7 @@ struct rtl_lan {
 #define RTL_P6_QX_BASE		0xf550d000UL
 #define RTL_P6_MAX_WRITES	400
 #define RTL_P6_MODE_SGMII_1G	0x4cf6
-#define RTL_P6_MODE_SGMII_2G5	0x5cf5
+#define RTL_P6_MODE_SGMII_2G5	0x4cf5
 #define RTL_P6_CLOCK_BIT	BIT(13)		/* QX_SDS_STATE ready */
 #define RTL_P6_CLOCK_TRIES	1501
 #define RTL_P6_CLOCK_STEP_MS	10
@@ -108,7 +108,7 @@ struct rtl_xram {
 	 * initial per-port member and use the same NI/DMA/QM owner. */
 	struct rtl_lan lan;
 	struct net_device *netdev;
-	struct net_device *ports[5];
+	struct net_device *ports[7];
 	unsigned int registered_ports;
 	struct work_struct lan4_work;
 	struct completion lan4_ready;
@@ -207,6 +207,9 @@ static void rtl_mib_work(struct work_struct *work)
 		int ret;
 
 		if (!(READ_ONCE(priv->registered_ports) & BIT(port)))
+			continue;
+		/* P6 uses the XGE MAC MIB, not the PT port MIB. */
+		if (port >= 5)
 			continue;
 		ret = rtl9617c_ni_pm_read(priv->netdev->dev.parent, port, counters);
 
@@ -324,6 +327,15 @@ static void rtl_adjust_link(struct net_device *dev)
 	struct phy_device *phy = dev->phydev;
 
 	if (phy->link) {
+		/* P6 is an XGE MAC: none of the PT port registers apply. */
+		if (lan->port >= 5) {
+			if (lan->shared->sgmii_speed != phy->speed) {
+				rtl_p6_set_speed(lan->shared, phy->speed);
+				lan->shared->sgmii_speed = phy->speed;
+			}
+			phy_print_status(dev->phydev);
+			return;
+		}
 		/* Port4's SGMII PCS requires GMII even at 10/100 Mbps. */
 		rtl_update(lan->shared, PORT_STATIC + lan->port * PORT_STRIDE,
 			   GENMASK(3, 0),
@@ -492,9 +504,19 @@ static netdev_tx_t rtl_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 	spin_lock_irqsave(&priv->tx_lock, flags);
 	if (priv->dma_tx) {
+		/*
+		 * The header carries the *NI egress port*, not the netdev index.
+		 * P6 is the XGE MAC and owns the port-4 slot of the NI port table
+		 * (rtl_p6_bringup programs its RX mux at 0xa5f8 + 0x90 * 4 and
+		 * logs it as "port4"); the OEM's aal_sds_mode_set has no lane 5/6
+		 * at all. lan7 is an OpenWrt naming choice, so a raw
+		 * (lan->port << 3) sends the frames to a port that does not exist
+		 * and the XGE MAC MIB never counts them.
+		 */
+		unsigned int egress = lan->port >= 5 ? 4 : lan->port;
 		const struct rtl9617c_ni_frame frame = {
 			.header_high = BIT(13),
-			.header_low = (16 << 9) | (lan->port << 3) | BIT(29),
+			.header_low = (16 << 9) | (egress << 3) | BIT(29),
 		};
 		netdev_tx_t result = rtl_dma_tx_frame(&priv->dma, skb, dev, &frame);
 
@@ -615,11 +637,31 @@ static bool rtl_p6_clock_ready(struct rtl_xram *priv)
 	return readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT;
 }
 
+/*
+ * The stock aal_sds_mode_set() lane-1 speed-1 (sgmii_2g5) path does not write
+ * only QX+0x8: after loading the mode word it falls through the shared tail at
+ * 0x1ba24, which stores the same 17-bit word into QX+0x08, +0x0c, +0x10 and
+ * +0x14. Those are the per-lane interface words of the four P6 sub-lanes, and
+ * leaving three of them at their power-on value keeps the receive side of the
+ * XGE MAC dead (measured: xge6_rx_good_frames stays 0 while the copper side
+ * links at 2500 and the driver still transmits).
+ */
+#define RTL_P6_LANE_STRIDE	4
+#define RTL_P6_LANE_COUNT	4
+
 static void rtl_p6_mode_word(struct rtl_xram *priv, u32 word)
 {
-	writel((readl(priv->p6_serdes + 0x8) & ~0x1ffffU) | (word & 0x1ffffU),
-	       priv->p6_serdes + 0x8);
+	unsigned int lane;
+
+	for (lane = 0; lane < RTL_P6_LANE_COUNT; lane++) {
+		void __iomem *reg = priv->p6_serdes + 0x8 +
+				    lane * RTL_P6_LANE_STRIDE;
+
+		writel((readl(reg) & ~0x1ffffU) | (word & 0x1ffffU), reg);
+	}
 }
+
+static void rtl_p6_mac_10g_config(struct rtl_xram *priv);
 
 /* __p6_mac_1g_config(): the XGE MAC sequence shared by 1G and 2.5G. */
 static void rtl_p6_mac_config(struct rtl_xram *priv)
@@ -700,6 +742,13 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		dev_warn(priv->netdev->dev.parent, "serdes load %s failed\n",
 			 priv->p6_profile[0].path);
 
+	/* The QX table ends with mode 0x1f (lane off) and bit0 set. The stock
+	 * live state is +0x4=0x1052, +0x8=0x5cf5 and +0x0 bit0 clear. */
+	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | 0x12,
+	       priv->p6_serdes + 0x4);
+	rtl_p6_mode_word(priv, RTL_P6_MODE_SGMII_2G5);
+	writel(readl(priv->p6_serdes) & ~BIT(0), priv->p6_serdes);
+
 	/*
 	 * QX_RESET bit0 holds the lane in reset. Measured on the unit:
 	 * with bit0 set QX_SDS_STATE stays 0x4000 (clock-ready bit13 clear)
@@ -737,11 +786,50 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4));
 }
 
+/* __p6_mac_10g_config(): the QXGMII 2.5G path in the OEM bootloader drives
+ * the XGE MAC in 10G mode (inf_sel=2), not the 1G sequence above. */
+static void __maybe_unused rtl_p6_mac_10g_config(struct rtl_xram *priv)
+{
+	void __iomem *ni = priv->ni;
+	u32 value;
+
+	/* Drain, then select the init interface. */
+	value = readl(ni + NITX_MISC_CFG);
+	writel(value | BIT(20), ni + NITX_MISC_CFG);
+
+	value = readl(ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))) | (3U << 28),
+	       ni + XGE_MISC_CONFIG);
+	mdelay(10);
+
+	/* Tx IPG and read thresholds. */
+	value = readl(ni + XGE_MAC_CFG_TX);
+	writel((value & ~3U) | 1, ni + XGE_MAC_CFG_TX);
+	value = readl(ni + XGE_MAC_CFG_TX_2);
+	writel((value & ~(0x1fU | (0x1fU << 8))) | 0xe | (0xcU << 8),
+	       ni + XGE_MAC_CFG_TX_2);
+
+	/* Pulse the MAC Tx/Rx resets. */
+	value = readl(ni + XGE_MAC_CFG_COM);
+	writel(value | BIT(14) | BIT(15), ni + XGE_MAC_CFG_COM);
+	mdelay(10);
+	value = readl(ni + XGE_MAC_CFG_COM);
+	writel(value & ~(BIT(14) | BIT(15)), ni + XGE_MAC_CFG_COM);
+
+	/* Interface select to 10G. */
+	value = readl(ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))) | (2U << 28),
+	       ni + XGE_MISC_CONFIG);
+
+	value = readl(ni + NITX_MISC_CFG);
+	writel(value & ~BIT(20), ni + NITX_MISC_CFG);
+}
+
 /* A 1G peer needs the matching lane load; 2.5G keeps the sgmii_2g5 profile. */
 static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 {
-	struct rtl_p6_profile *profile = &priv->p6_profile[speed == SPEED_2500 ? 0 : 1];
-
 	/* p6-bringup-off must disable the whole P6 path, including the link
 	 * callback. The PT1500 uses the reference NI4/S3 SGMII path; writing
 	 * the QX table and rearming the XGE MAC here happens after the copper
@@ -751,13 +839,8 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 		return;
 	if (!priv->p6_serdes)
 		return;
-	if (!rtl_p6_read(priv, profile) && profile->count)
-		rtl_p6_apply(priv, profile);
-	rtl_p6_mode_word(priv, speed == SPEED_2500 ? RTL_P6_MODE_SGMII_2G5 :
-			 RTL_P6_MODE_SGMII_1G);
-	/* The MAC is programmed once at engine start, before the lane has a
-	 * peer. Re-arm it whenever the link changes speed so the receive path
-	 * is re-initialised after the PHY switched its line side. */
+	/* QX is owned and kept alive by the bootloader. Replaying a table or
+	 * rewriting QX_MODE here re-asserts QX_RESET and kills the line side. */
 	rtl_p6_mac_config(priv);
 }
 
@@ -769,7 +852,7 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	int ret;
 
 	/* The 2.5G lane must be alive before the switch fabric forwards to it. */
-	if (priv->ports[4])
+	if (priv->ports[6])
 		rtl_p6_bringup(priv);
 
 	if (priv->dma_tx) {
@@ -783,7 +866,7 @@ static int rtl_engine_start(struct rtl_xram *priv)
 		 * holds VOQ120..127 buffers until every LAN/PON data path runs out. */
 		rtl_update(priv, 0x2304 + 12 * 14, 0xff, 0xff);
 		rtl_update(priv, 0x2300, BIT(31) | BIT(15), BIT(31) | BIT(15));
-		for (port = 0; port < ARRAY_SIZE(priv->ports); port++)
+		for (port = 0; port < 5; port++)
 			if (priv->ports[port]) {
 				rtl_update(priv, 0x2300, BIT(31) | BIT(port), BIT(31) | BIT(port));
 				rtl_update(priv, 0x2304 + 12 * port, 0xff, 0xff);
@@ -798,7 +881,7 @@ static int rtl_engine_start(struct rtl_xram *priv)
 			rtl_dma_tx_stop(&priv->dma);
 			return ret;
 		}
-		for (port = 0; port < ARRAY_SIZE(priv->ports); port++)
+		for (port = 0; port < 5; port++)
 			if (priv->ports[port])
 				rtl_update(priv, 0xa5f8 + PORT_STRIDE * port,
 					   BIT(28) | GENMASK(21, 16) | BIT(31), BIT(28) | (16 << 16));
@@ -884,12 +967,15 @@ static int rtl_open(struct net_device *dev)
 
 	if (ret)
 		return ret;
-	/* Stock aal_set_active_port releases this port's interface and RX/TX resets. */
-	rtl_update(priv, 0xa008, BIT(lan->port) | BIT(lan->port + 6) | BIT(lan->port + 12), 0);
-	rtl_update(priv, PORT_STATIC + lan->port * PORT_STRIDE,
-		   GENMASK(31, 24), (u32)dev->dev_addr[5] << 24);
-	rtl_update(priv, PORT_RX + lan->port * PORT_STRIDE, BIT(0), BIT(0));
-	rtl_update(priv, PORT_TX + lan->port * PORT_STRIDE, BIT(0), BIT(0));
+	/* P6 has no PT port block; its XGE MAC is programmed separately. */
+	if (lan->port < 5) {
+		/* Stock aal_set_active_port releases this port's interface and RX/TX resets. */
+		rtl_update(priv, 0xa008, BIT(lan->port) | BIT(lan->port + 6) | BIT(lan->port + 12), 0);
+		rtl_update(priv, PORT_STATIC + lan->port * PORT_STRIDE,
+			   GENMASK(31, 24), (u32)dev->dev_addr[5] << 24);
+		rtl_update(priv, PORT_RX + lan->port * PORT_STRIDE, BIT(0), BIT(0));
+		rtl_update(priv, PORT_TX + lan->port * PORT_STRIDE, BIT(0), BIT(0));
+	}
 	phy_start(dev->phydev);
 	netif_start_queue(dev);
 	return 0;
@@ -903,8 +989,10 @@ static int rtl_stop(struct net_device *dev)
 
 	netif_stop_queue(dev);
 	phy_stop(dev->phydev);
-	rtl_update(priv, PORT_RX + lan->port * PORT_STRIDE, BIT(0), 0);
-	rtl_update(priv, PORT_TX + lan->port * PORT_STRIDE, BIT(0), 0);
+	if (lan->port < 5) {
+		rtl_update(priv, PORT_RX + lan->port * PORT_STRIDE, BIT(0), 0);
+		rtl_update(priv, PORT_TX + lan->port * PORT_STRIDE, BIT(0), 0);
+	}
 	rtl_fe_flush_port(priv->fe, dev);
 	if (priv->dma_tx) {
 		spin_lock_irqsave(&priv->tx_lock, flags);
@@ -1119,12 +1207,16 @@ static const struct ethtool_ops rtl_ethtool_ops = {
 static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 {
 	struct rtl_xram *priv = container_of(led, struct rtl_xram, phy_led);
+	struct net_device *dev = priv->ports[6] ? priv->ports[6] : priv->ports[4];
+
+	if (!dev)
+		return -ENODEV;
 	/* LCR7 bit0 forces the lamp, bit4 inverts link/activity. The TYFZA1
 	 * value 0x10 for "link/activity" is inverted on this unit: measured
 	 * with the cable out the lamp was lit, with it in it went dark, and
 	 * traffic made it blink. Leaving both bits clear lets the PHY drive
 	 * its own link/activity with normal polarity. */
-	return phy_modify_mmd(priv->ports[4]->phydev, MDIO_MMD_VEND2,
+	return phy_modify_mmd(dev->phydev, MDIO_MMD_VEND2,
 			      0xd044, 0x11, value == 2 ? 0x00 : value);
 }
 
@@ -1135,7 +1227,7 @@ static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)
 
 	if (!dev)
 		return;
-	if (port == 4 && priv->phy_led_registered) {
+	if ((port == 4 || port == 6) && priv->phy_led_registered) {
 		tyfza1_led_unregister(&priv->phy_led);
 		priv->phy_led_registered = false;
 	}
@@ -1200,8 +1292,8 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	}
 	priv->ports[port] = dev;
 	SET_NETDEV_DEV(dev, parent);
-	/* Port 4 is the SGMII lane. It is lan4 while port 3 stays unwired (the
-	 * TYFZA1 2.5G tower) and lan5 on a board that also wires port 3. */
+	/* Keep the r36 naming: PT GE ports are lan1.., P6 is an extra
+	 * interface. Do not renumber GE while bringing up the 2.5G LED. */
 	index = port == 4 ? 4 : port + 1;
 	if (port == 4 && priv->ports[3])
 		index = 5;
@@ -1221,7 +1313,8 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 		goto put_phy;
 	}
 	ret = phy_connect_direct(dev, phydev, rtl_adjust_link,
-		port == 4 ? PHY_INTERFACE_MODE_SGMII : PHY_INTERFACE_MODE_GMII);
+		(port == 4 || port == 6) ? PHY_INTERFACE_MODE_SGMII :
+		PHY_INTERFACE_MODE_GMII);
 	put_device(&phydev->mdio.dev);
 	if (ret)
 		goto put_phy;
@@ -1241,10 +1334,11 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	if (ret)
 		goto put_phy;
 	WRITE_ONCE(priv->registered_ports, priv->registered_ports | BIT(port));
-	if (port == 4) {
+	if (port == 6 || (port == 4 && !priv->ports[6])) {
 		priv->phy_led.output = rtl_phy_led_output;
 		priv->phy_led.requested = 2;
-		priv->phy_led.cdev.name = "LED_8221B_P4_0";
+		priv->phy_led.cdev.name = port == 6 ? "LED_8221B_P6_0" :
+					       "LED_8221B_P4_0";
 		priv->phy_led.cdev.max_brightness = 2;
 		ret = tyfza1_led_register(parent, &priv->phy_led, NULL);
 		if (ret)
@@ -1290,7 +1384,7 @@ static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 	/* Do not expose an openable port until all synchronous ports are
 	 * published and LAN4 work is queued (or its completion is signalled). */
 	rtnl_lock();
-	for (port = 0; port < ARRAY_SIZE(priv->ports); port++) {
+	for (port = 0; port < 5; port++) {
 		phy = of_parse_phandle(parent->of_node,
 			port == priv->port ? "phy-handle" : "realtek,lan-phys",
 			port == priv->port ? 0 : port);
@@ -1315,6 +1409,14 @@ static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 		if (ret)
 			dev_err(parent, "LAN%u initialization failed: %d; other ports retained\n",
 				port + 1, ret);
+	}
+	/* P6 is the XGE MAC for the 2.5G jack: an independent netdev, not a
+	 * PT port. It shares the CPU0 QM receive pool. */
+	phy = of_parse_phandle(parent->of_node, "realtek,p6-phy", 0);
+	if (phy) {
+		ret = rtl_register_lan(priv, parent, 6, phy);
+		if (ret)
+			dev_err(parent, "P6 initialization failed: %d\n", ret);
 	}
 	if (!priv->lan4_phy)
 		complete_all(&priv->lan4_ready);
@@ -1546,6 +1648,32 @@ static ssize_t qm_state_show(struct device *dev, struct device_attribute *attr, 
 }
 static DEVICE_ATTR_RO(qm_state);
 
+/* Read-only XGE6 counter probe: tells whether the QX lane delivers frames
+ * before any netdev is bound to the 10G MAC. cnt_id 3 = RX_GOOD_FRAMES. */
+static ssize_t xge_state_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
+	u64 frames;
+	u32 lo, hi;
+	int i;
+
+	writel(BIT(31) | 3, priv->ni + 0xb270);
+	for (i = 0; i < 1000; i++) {
+		if (!(readl(priv->ni + 0xb270) & BIT(31)))
+			break;
+		udelay(1);
+	}
+	hi = readl(priv->ni + 0xb274);
+	lo = readl(priv->ni + 0xb278);
+	frames = ((u64)hi << 32) | lo;
+	return sysfs_emit(buf,
+			  "xge6_rx_good_frames=%llu misc=%08x com=%08x rxcfg=%08x\n",
+			  frames, readl(priv->ni + 0xb2a8),
+			  readl(priv->ni + 0xb200), readl(priv->ni + 0xb204));
+}
+static DEVICE_ATTR_RO(xge_state);
+
 static ssize_t qm_trace_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
@@ -1671,6 +1799,7 @@ static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
 	&dev_attr_qm_state.attr,
+	&dev_attr_xge_state.attr,
 	&dev_attr_qm_trace.attr,
 	&dev_attr_qm_pool.attr,
 	&dev_attr_pon_deepq.attr,
@@ -1725,7 +1854,7 @@ static int rtl_probe(struct platform_device *pdev)
 		ret = IS_ERR(priv->ni) ? PTR_ERR(priv->ni) : PTR_ERR(priv->xram);
 		goto free_netdev;
 	}
-	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_qxgmii_2g5.txt";
+	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
 	priv->p6_profile[0].speed = SPEED_2500;
 	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
 	priv->p6_profile[1].speed = SPEED_1000;

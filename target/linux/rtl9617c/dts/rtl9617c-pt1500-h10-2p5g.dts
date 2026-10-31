@@ -355,7 +355,8 @@
 		// MAC port n.
 		realtek,port = <0>;
 		phy-handle = <&phy1>;
-		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4 &phy_2p5g>;
+		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4>;
+		realtek,p6-phy = <&phy_2p5g>;
 		phys = <&pcie_controls 5>;
 		phy-names = "sgmii";
 		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;

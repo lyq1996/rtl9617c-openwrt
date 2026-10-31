@@ -240,10 +240,10 @@ static int rtl8221b_tyfza1_resume(struct phy_device *phydev)
 
 static int rtl8221b_tyfza1_config_aneg(struct phy_device *phydev)
 {
-	/* Pt1500 golden state: leave the PHY exactly as it comes out of reset.
-	 * The vendor aneg path writes the 2.5G mode words and takes the line
-	 * side out of the stock state (measured 0x6f10 0x084a -> 0x086a and
-	 * 0x758d link bit clear). */
+	/* PT1500 runs the generic aneg path but not the TYFZA1-only finish. */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,no-vendor-finish"))
+		return rtl822x_c45_config_aneg(phydev);
 	if (of_property_read_bool(phydev->mdio.dev.of_node,
 				  "realtek,hsgmii-init-off"))
 		return 0;
@@ -291,6 +291,11 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 			    ret);
 		ret = 0;
 	}
+	/* PT1500 keeps the PHY's own post-link state; the a408/a412/a5d4
+	 * finish is only used by the TYFZA1 reference. */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,no-vendor-finish"))
+		return 0;
 	/* Also applied again from resume, after phylib powers the part up. */
 	return rtl8221b_tyfza1_finish(phydev);
 error:
