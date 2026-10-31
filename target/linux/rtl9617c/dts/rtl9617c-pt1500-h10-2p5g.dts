@@ -283,18 +283,18 @@
 	 * phylib use the indirect 0x0d/0x0e MMD registers. */
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
-		/* PT1500 uses the RTL8221B variant whose vendor init is skipped by
-		 * the stock driver: the golden state on a working unit is the
-		 * power-on 0x6f10=0x084a / 0x6f11=0x0021 with 0xa400=0x1040 and
-		 * 0xa434 bit2 set. The TYFZA1 HiSGMII force-down sequence writes
-		 * 0xd433 and leaves the line side down (0x758d bit1=0), which is
-		 * exactly why this port received nothing. Keep the PHY untouched.
+		/* The RTL8221B has to be put into HiSGMII mode. Its power-on
+		 * values (0x6f10=0x084a / 0x6f11=0x0021) are NOT a golden
+		 * state: this unit reads exactly those while the QX lane stays
+		 * RXIDLE-with-BER and carries no frame in either direction.
 		 *
-		 * Re-confirmed by direct MMD access on this unit: the post-reset
-		 * values are exactly 6f10=084a / 6f11=0021 / a400=1040 /
-		 * a434=131e (bit2 set), and running the HiSGMII sequence moves
-		 * them to 5046/8001/5040 and drops the copper link. */
-		realtek,hsgmii-init-off;
+		 * realtek,hsgmii runs the stock rtl8221b.ko bring-up
+		 * (Rtl8221_serdes_option_set_for_init, option 0), which writes
+		 * 0x6f10=0xd455 / 0x6f11=0x8020 and performs no force-down
+		 * request. realtek,no-vendor-finish keeps the TYFZA1-only
+		 * a408/a412/a5d4 finish off this board. */
+		realtek,hsgmii;
+		realtek,no-vendor-finish;
 	};
 };
 

@@ -156,57 +156,51 @@ static int rtl8221b_load_patch(struct phy_device *phydev)
 
 static int rtl8221b_hsgmii(struct phy_device *phydev)
 {
-	int ret, val, release;
+	int ret, val;
 
+	/*
+	 * This follows the stock rtl8221b.ko Rtl8221_serdes_option_set_for_init
+	 * (option 0), disassembled from the OEM module at 0x3de0, rather than
+	 * the TYFZA1 reference sequence:
+	 *
+	 *   0x75f3 &= ~BIT(0)
+	 *   0x697a  = (0x697a & 0xffc0) | option      (option 0)
+	 *   0x6a04  = 0x0503                          (option 0 path)
+	 *   0x6f10  = 0xd455        <-- NOT 0xd433
+	 *   0x6f11  = 0x8020
+	 *
+	 * and, crucially, the OEM init path performs no force-down request:
+	 * the 0xa400 bit14 toggle plus the 0xa434 bit2 ACK poll belong to
+	 * Rtl8221_serdes_option_set (0x3b8c), the runtime path, not to init.
+	 * On this unit that toggle never ACKs and leaves the line side down.
+	 *
+	 * The previous power-on values (0x6f10=0x084a / 0x6f11=0x0021) were
+	 * recorded here as a "golden state", but they are simply the reset
+	 * defaults: the unit reads exactly those while the lane stays
+	 * RXIDLE-with-BER and carries no frame, so they are not golden.
+	 */
 	ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x75f3, BIT(0), 0);
 	if (ret < 0)
 		return ret;
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x697a, 0x3f, 1);
+	ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x697a, 0x3f, 0);
 	if (ret < 0)
 		return ret;
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6a04, 0x0503);
 	if (ret < 0)
 		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f10, 0xd433);
+	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f10, 0xd455);
 	if (ret < 0)
 		return ret;
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f11, 0x8020);
 	if (ret < 0)
 		return ret;
-	/* Measured on the unit: the force-down ACK only appears when 0x6f10
-	 * and 0x6f11 already hold the HSGMII values. At probe they are written
-	 * while the part is still settling and read back as their power-on
-	 * values (0x084a / 0x0021), which is why every boot ended in the
-	 * "ACK absent" path. Verify and retry before asking for the ACK. */
-	for (ret = 0; ret < 3; ret++) {
-		int f10 = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f10);
-		int f11 = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f11);
 
-		if (f10 == 0xd433 && (f11 & 0xffff) == 0x8020)
-			break;
-		if (f10 >= 0 && (f10 & 0xffff) != 0xd433)
-			phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f10, 0xd433);
-		if (f11 >= 0 && (f11 & 0xffff) != 0x8020)
-			phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f11, 0x8020);
-		usleep_range(1000, 2000);
-	}
+	/* Read back so a silently rejected write is visible in the log. */
+	val = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f10);
+	phydev_info(phydev, "HiSGMII init: 6f10=%04x 6f11=%04x\n", val,
+		    phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f11));
 
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa400, 0, BIT(14));
-	if (ret < 0)
-		return ret;
-	ret = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND2, 0xa434,
-					val, val & BIT(2), 100000, 10000000, false);
-	release = rtl8221b_update(phydev, MDIO_MMD_VEND2, 0xa400, BIT(14), 0);
-	if (release < 0)
-		phydev_err(phydev, "HiSGMII force-down release failed: %d\n", release);
-	/* The OEM also completes this sequence without the force-down ACK.
-	 * In particular, PMA low power can leave a434 bit2 clear. The request
-	 * must still be released before phylib resumes the copper PHY. */
-	if (ret == -ETIMEDOUT) {
-		phydev_warn(phydev, "HiSGMII force-down ACK absent; request released\n");
-		return release;
-	}
-	return ret < 0 ? ret : release;
+	return 0;
 }
 
 /* Vendor finish that must run after the PHY is powered and before autoneg.

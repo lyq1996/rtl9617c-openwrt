@@ -92,6 +92,9 @@ struct rtl_lan {
 #define XGE_MAC_CFG_TX_2	0xb20c
 #define XGE_MISC_CONFIG		0xb2a8
 #define NITX_MISC_CFG		0xa1f4
+/* NI_HV_GLB_INTF_RST_CONFIG: bit21 = mac_rst_p6, bits 4/10/16 = the
+ * interface / MAC rx / MAC tx resets of the port slot P6 occupies. */
+#define NI_GLB_INTF_RST_CONFIG	0xa008
 #define L2TM_ES_CTRL		0x2300
 #define QM_ES_CTRL		0x6108
 
@@ -505,15 +508,16 @@ static netdev_tx_t rtl_xmit(struct sk_buff *skb, struct net_device *dev)
 	spin_lock_irqsave(&priv->tx_lock, flags);
 	if (priv->dma_tx) {
 		/*
-		 * The header carries the *NI egress port*, not the netdev index.
-		 * P6 is the XGE MAC and owns the port-4 slot of the NI port table
-		 * (rtl_p6_bringup programs its RX mux at 0xa5f8 + 0x90 * 4 and
-		 * logs it as "port4"); the OEM's aal_sds_mode_set has no lane 5/6
-		 * at all. lan7 is an OpenWrt naming choice, so a raw
-		 * (lan->port << 3) sends the frames to a port that does not exist
-		 * and the XGE MAC MIB never counts them.
+		 * The header carries the *NI egress port*. The OEM names the P6
+		 * XGE jack NI_PORT_6 = 6 (include/taurus_ni.h), and the switch
+		 * fabric agrees: L2TM_ES_CTRL (0x2300) comes up with tx_port6_en
+		 * set and tx_port4_en clear. An earlier version of this driver
+		 * sent P6 frames to egress 4 on the theory that P6 owns the
+		 * port-4 slot; measured with that value every one of the 64 XGE
+		 * MAC MIB counters stayed zero, and enabling tx_port4_en did not
+		 * change that. Send to the port the fabric actually enables.
 		 */
-		unsigned int egress = lan->port >= 5 ? 4 : lan->port;
+		unsigned int egress = lan->port >= 5 ? 6 : lan->port;
 		const struct rtl9617c_ni_frame frame = {
 			.header_high = BIT(13),
 			.header_low = (16 << 9) | (egress << 3) | BIT(29),
@@ -742,13 +746,27 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		return;
 	priv->p6_started = true;
 
-	/* Stock leaves GLOBAL_BLOCK_RESET at 0x102001c0 (bits 6..8, 21, 28
-	 * set) while the QX lane is alive. Our bootloader leaves 0x8f, which
-	 * keeps the P6/QX block clock-gated. Preserve our low lane-reset bits
-	 * and add the stock block bits. */
+	/*
+	 * OEM ca_ni_p6_qxgmii_init() pulses the QXGMII block reset rather than
+	 * leaving it released:
+	 *     glb_blk_reset.bf.reset_qxgmii = 1;  write;  mdelay(50);
+	 *     glb_blk_reset.bf.reset_qxgmii = 0;  write;
+	 * reset_qxgmii is bit 31 of GLOBAL_BLOCK_RESET, so the previous
+	 * "| 0x102001c0" (bits 6..8, 21, 28) never touched the QXGMII block at
+	 * all and it was never brought out of reset. Pulse it here, keeping the
+	 * stock block bits the comment below describes.
+	 */
 	if (priv->qm.block_reset) {
 		value = readl(priv->qm.block_reset);
 		writel(value | 0x102001c0U, priv->qm.block_reset);
+		/* Assert QXGMII reset. */
+		value = readl(priv->qm.block_reset);
+		writel(value | BIT(31), priv->qm.block_reset);
+		mdelay(50);
+		/* Release it. */
+		value = readl(priv->qm.block_reset);
+		writel(value & ~BIT(31), priv->qm.block_reset);
+		mdelay(1);
 	}
 
 	/* Power the QX lane and select the SGMII 2.5G interface mode. */
@@ -823,15 +841,29 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	 */
 	rtl_update(priv, 0xa5c8 + PORT_STRIDE * 4, BIT(0), BIT(0));
 
+	/*
+	 * Release the interface/MAC resets for the P6 port slot. The reset
+	 * register comes out of reset with every bit asserted
+	 * (NI_HV_GLB_INTF_RST_CONFIG_dft = 0x0077ffff) and the OEM's
+	 * aal_set_active_port() is what clears them; without this the P6 XGE
+	 * MAC stays held in reset. mac_rst_p6 is bit 21; the interface and
+	 * MAC resets of the port slot P6 occupies are bits 4, 10 and 16.
+	 * Measured before this: 0xa008 = 0x00770c30 with mac_rst_p6 set, and
+	 * all 64 XGE MAC MIB counters read zero.
+	 */
+	rtl_update(priv, NI_GLB_INTF_RST_CONFIG,
+		   BIT(21) | BIT(4) | BIT(10) | BIT(16), 0);
+
 	/* rtl_p6_mac_config() above is the 1G sequence and leaves the XGE MAC
 	 * on GMII; the OEM leaves P6 on the 10G/2.5G interface select. */
 	rtl_p6_mac_iface_select(priv);
 
 	dev_info(priv->netdev->dev.parent,
-		 "P6 rx mux: xge=%08x port4=%08x misc=%08x\n",
+		 "P6 rx mux: xge=%08x port4=%08x misc=%08x rst=%08x\n",
 		 readl(priv->ni + 0xb204),
 		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4),
-		 readl(priv->ni + XGE_MISC_CONFIG));
+		 readl(priv->ni + XGE_MISC_CONFIG),
+		 readl(priv->ni + NI_GLB_INTF_RST_CONFIG));
 }
 
 /* __p6_mac_10g_config(): the QXGMII 2.5G path in the OEM bootloader drives

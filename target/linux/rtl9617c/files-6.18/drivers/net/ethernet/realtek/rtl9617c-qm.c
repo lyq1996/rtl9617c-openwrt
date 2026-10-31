@@ -101,17 +101,16 @@ static int rtl_qm_ingress(struct rtl_qm_rx *rx, unsigned int port)
 
 	/*
 	 * `port` arrives as the netdev index (rx->lan[i]), but every register
-	 * below takes the *NI hardware port id*. Those differ for the 2.5G jack:
-	 * lan7 is registered as index 6 while the P6/XGE MAC owns the port-4
-	 * slot of the NI port table - rtl_p6_bringup() already programs its RX
-	 * mux at 0xa5f8 + PORT_STRIDE * 4 - and the OEM aal_sds_mode_set
-	 * dispatch table has no lane 5/6 at all. Building the LDPID, the
-	 * per-port rule index and the PONCLE TCAM match key from 6 leaves the
-	 * XGE port without an ingress rule, so its frames never reach the queue
-	 * manager and rx stays at zero.
+	 * below takes the *NI hardware port id*. The OEM names the P6 XGE jack
+	 * NI_PORT_6 = 6 (include/taurus_ni.h) and the switch fabric enables
+	 * exactly that port: L2TM_ES_CTRL (0x2300) comes up with tx_port6_en
+	 * set and tx_port4_en clear. An earlier version of this driver mapped
+	 * the jack onto the port-4 slot instead; with that mapping every one of
+	 * the 64 XGE MAC MIB counters stayed zero. Use the port the OEM and the
+	 * fabric both use.
 	 */
 	if (port >= 5)
-		port = 4;
+		port = 6;
 
 	/* Original aal_port_init builds both my-MAC cases: ordinary LAN
 	 * LDPID maps to its physical MAC,deep-buffer traffic enters PDPID8.
