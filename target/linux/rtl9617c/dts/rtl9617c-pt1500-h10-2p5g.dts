@@ -288,7 +288,12 @@
 		 * power-on 0x6f10=0x084a / 0x6f11=0x0021 with 0xa400=0x1040 and
 		 * 0xa434 bit2 set. The TYFZA1 HiSGMII force-down sequence writes
 		 * 0xd433 and leaves the line side down (0x758d bit1=0), which is
-		 * exactly why this port received nothing. Keep the PHY untouched. */
+		 * exactly why this port received nothing. Keep the PHY untouched.
+		 *
+		 * Re-confirmed by direct MMD access on this unit: the post-reset
+		 * values are exactly 6f10=084a / 6f11=0021 / a400=1040 /
+		 * a434=131e (bit2 set), and running the HiSGMII sequence moves
+		 * them to 5046/8001/5040 and drops the copper link. */
 		realtek,hsgmii-init-off;
 	};
 };

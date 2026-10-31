@@ -632,6 +632,27 @@ static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 		writel(profile->word[i][1], priv->p6_serdes + profile->word[i][0]);
 }
 
+/*
+ * One analog SDS register write, matching the OEM __p6_serdes_ind_write():
+ * DATAIN first, then REG_ACCESS with sds_we|sds_access set. The OEM helper
+ * takes a (page, reg) pair and encodes sds_a = (page << 5) | reg, so callers
+ * here pass that already-combined address.
+ */
+#define RTL_P6_REG_DATAIN	0x50
+#define RTL_P6_REG_ACCESS	0x4c
+#define RTL_P6_REG_DATAOUT	0x54
+#define RTL_P6_SDS_WE		BIT(30)
+#define RTL_P6_SDS_ACCESS	BIT(31)
+
+static void rtl_p6_ind_write(struct rtl_xram *priv, u32 addr, u16 data)
+{
+	writel(data, priv->p6_serdes + RTL_P6_REG_DATAIN);
+	writel(RTL_P6_SDS_ACCESS | RTL_P6_SDS_WE | (addr & 0xffff),
+	       priv->p6_serdes + RTL_P6_REG_ACCESS);
+	/* The OEM waits 1 ms here; the analog block needs it to settle. */
+	mdelay(1);
+}
+
 static bool rtl_p6_clock_ready(struct rtl_xram *priv)
 {
 	return readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT;
@@ -662,6 +683,7 @@ static void rtl_p6_mode_word(struct rtl_xram *priv, u32 word)
 }
 
 static void rtl_p6_mac_10g_config(struct rtl_xram *priv);
+static void rtl_p6_mac_iface_select(struct rtl_xram *priv);
 
 /* __p6_mac_1g_config(): the XGE MAC sequence shared by 1G and 2.5G. */
 static void rtl_p6_mac_config(struct rtl_xram *priv)
@@ -736,6 +758,17 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | 2, priv->p6_serdes + 0x4);
 	rtl_p6_mode_word(priv, RTL_P6_MODE_SGMII_2G5);
 
+	/*
+	 * The OEM's ca_ni_p6_qxgmii_init() writes the analog SDS byte before
+	 * loading the SerDes table:
+	 *     __p6_serdes_ind_write(page 0x20, reg 5, 0x9f)
+	 * which lands on indirect address (0x20 << 5) | 5 = 0x405. It is not
+	 * part of any /etc/serdes table, so replaying the table alone leaves
+	 * 0x405 at its power-on 0. Measured on the unit: the lane still reports
+	 * clock ready and RXIDLE set, and no frame crosses the link.
+	 */
+	rtl_p6_ind_write(priv, 0x405, 0x009f);
+
 	if (rtl_p6_read(priv, &priv->p6_profile[0]) == 0)
 		rtl_p6_apply(priv, &priv->p6_profile[0]);
 	else
@@ -781,9 +814,24 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	 */
 	rtl_update(priv, 0xb204, BIT(1) | BIT(9), BIT(1));
 	rtl_update(priv, 0xa5f8 + PORT_STRIDE * 4, BIT(8) | BIT(9), BIT(9));
+
+	/*
+	 * The P6 port block's receive MAC is left disabled by reset: at
+	 * 0xa5c8 + 0x90 * 4 the RXMAC_CFG word reads 0x00001100, i.e. rx_en
+	 * (bit0) clear, while the working 1G ports read 0x00001101. Without
+	 * it the XGE MAC never presents a receive stream.
+	 */
+	rtl_update(priv, 0xa5c8 + PORT_STRIDE * 4, BIT(0), BIT(0));
+
+	/* rtl_p6_mac_config() above is the 1G sequence and leaves the XGE MAC
+	 * on GMII; the OEM leaves P6 on the 10G/2.5G interface select. */
+	rtl_p6_mac_iface_select(priv);
+
 	dev_info(priv->netdev->dev.parent,
-		 "P6 rx mux: xge=%08x port4=%08x\n", readl(priv->ni + 0xb204),
-		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4));
+		 "P6 rx mux: xge=%08x port4=%08x misc=%08x\n",
+		 readl(priv->ni + 0xb204),
+		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4),
+		 readl(priv->ni + XGE_MISC_CONFIG));
 }
 
 /* __p6_mac_10g_config(): the QXGMII 2.5G path in the OEM bootloader drives
@@ -827,6 +875,52 @@ static void __maybe_unused rtl_p6_mac_10g_config(struct rtl_xram *priv)
 	writel(value & ~BIT(20), ni + NITX_MISC_CFG);
 }
 
+/*
+ * The P6 XGE MAC's interface select is not a per-speed field: the OEM
+ * __p6_mac_10g_config() ends on inf_sel=2 with gige_mode=0 for every P6
+ * link, and 2.5G is carried by the SerDes line rate (3.125G in the
+ * sgmii_2g5 table), not by a 1G MAC mode. rtl_p6_mac_config() above is the
+ * 1G variant and leaves inf_sel=1 / gige_mode=1, so the MAC drives a GMII
+ * interface while the lane delivers 3.125G.
+ *
+ * Measured on the unit: with inf_sel=1 both directions are dead
+ * (xge6_rx_good_frames stays 0 and the peer's rx_bytes do not move), and
+ * QX_SDS_STATE reports RXIDLE (bit14) set. Re-running the OEM select
+ * sequence to inf_sel=2 is what the stock firmware leaves behind.
+ */
+static void rtl_p6_mac_iface_select(struct rtl_xram *priv)
+{
+	void __iomem *ni = priv->ni;
+	u32 value;
+
+	/* Drain the P6 Tx path while the interface is reselected. */
+	value = readl(ni + NITX_MISC_CFG);
+	writel(value | BIT(20), ni + NITX_MISC_CFG);
+
+	/* init state, then the training value the OEM uses before the reset. */
+	value = readl(ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))) | (3U << 28),
+	       ni + XGE_MISC_CONFIG);
+	mdelay(10);
+
+	/* Pulse the MAC Tx/Rx resets with the new interface selected. */
+	value = readl(ni + XGE_MAC_CFG_COM);
+	writel(value | BIT(14) | BIT(15), ni + XGE_MAC_CFG_COM);
+	mdelay(10);
+	value = readl(ni + XGE_MAC_CFG_COM);
+	writel(value & ~(BIT(14) | BIT(15)), ni + XGE_MAC_CFG_COM);
+
+	/* Interface select to 10G/2.5G: gige_mode=0, inf_sel=2. */
+	value = readl(ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))) | (2U << 28),
+	       ni + XGE_MISC_CONFIG);
+
+	value = readl(ni + NITX_MISC_CFG);
+	writel(value & ~BIT(20), ni + NITX_MISC_CFG);
+}
+
 /* A 1G peer needs the matching lane load; 2.5G keeps the sgmii_2g5 profile. */
 static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 {
@@ -842,6 +936,9 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 	/* QX is owned and kept alive by the bootloader. Replaying a table or
 	 * rewriting QX_MODE here re-asserts QX_RESET and kills the line side. */
 	rtl_p6_mac_config(priv);
+	/* rtl_p6_mac_config() is the 1G variant and leaves the MAC on the GMII
+	 * interface; put the P6 XGE MAC back on the OEM's 10G/2.5G select. */
+	rtl_p6_mac_iface_select(priv);
 }
 
 static int rtl_engine_start(struct rtl_xram *priv)
