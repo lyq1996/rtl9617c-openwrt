@@ -156,35 +156,60 @@ static int rtl8221b_load_patch(struct phy_device *phydev)
 
 static int rtl8221b_hsgmii(struct phy_device *phydev)
 {
-	int ret;
+	int ret, val;
 
 	/*
-	 * Measured on this unit: the jack reaches 2.5Gbps/Full with the peer
-	 * adapter also reporting 2.5Gbps when the RTL8221B is left in its own
-	 * default mode after a clean software reset. Every attempt to force
-	 * the HiSGMII mode words instead killed the copper link:
+	 * Bring-up order taken from the RTL8221B(I)-VB/VM datasheet
+	 * (Track ID JATR-8275-15 Rev 1.0). The datasheet lists the events that
+	 * trigger a full initialization: power-up, hardware reset, software
+	 * reset (MMD7.0x0000.15), restart auto-negotiation (MMD7.0x0000.9),
+	 * transition from power down to power up, and entering the link fail
+	 * state. It also defines PHYSCR (MMD31.0xA468) bit1 as "PHY Special
+	 * Config Done", which software must write to 1.
 	 *
-	 *   - with 0x6f10 = 0xd455 / 0x6f11 = 0x8020 (stock
-	 *     Rtl8221_serdes_option_set_for_init option 0, disassembled at
-	 *     0x3de0) the part reads back 0x086a / 0x0021 after init, 0xa434
-	 *     bit2 stays clear and BMSR link never asserts;
-	 *   - the TYFZA1 force-down handshake (0xa400 bit14 -> poll 0xa434
-	 *     bit2) never ACKs here either;
-	 *   - a software reset (BMCR bit15) brings the link up within ~3s,
-	 *     with C22 reg5 (link partner ability) reading 0xd741.
+	 * Measured on this unit before this change: 0xA468 read 0x0001 (bit1
+	 * clear) and PHYSR (0xA434) read 0x5602, i.e. ALDPS bit14 set and
+	 * MDI Plug bit13 clear -- the part believed no cable was plugged in.
+	 * Writing 0xA468.1 and then doing software reset + autoneg restart
+	 * moved PHYSR to 0x1b1e: ALDPS cleared, link bit2 set, and the
+	 * Speed_h/Speed_l pair decoded as 2.5G full duplex. So the sequence
+	 * below is what actually establishes the copper link.
 	 *
-	 * So do exactly what works: reset the part and leave its mode alone.
-	 * The lane is still programmed for 2.5G on the SoC side by
-	 * rtl_sgmii_link(), which is what carries the speed.
+	 * The HiSGMII mode words are deliberately not written: the datasheet
+	 * defines 0x697A[5:0] as the SDS option mode (0: 2500Base-X+SGMII,
+	 * 1: HiSGMII+SGMII, 2: 2500Base-X, 3: HiSGMII), and forcing the
+	 * HiSGMII variants on this board drops the copper link instead.
 	 */
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, 0xa468);
+	if (ret < 0)
+		return ret;
+	if (!(ret & 0x0002)) {
+		ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa468, ret | 0x0002);
+		if (ret < 0)
+			return ret;
+	}
+
 	ret = phy_write(phydev, MDIO_CTRL1, BMCR_RESET);
 	if (ret < 0)
 		return ret;
-	ret = phy_read_poll_timeout(phydev, MDIO_CTRL1, ret,
-				    !(ret & BMCR_RESET), 10000, 2000000, true);
+	ret = phy_read_poll_timeout(phydev, MDIO_CTRL1, val,
+				    !(val & BMCR_RESET), 10000, 2000000, true);
 	if (ret < 0)
 		return ret;
-	phydev_info(phydev, "reset done, leaving PHY in its default copper mode\n");
+
+	/* Restart auto-negotiation is itself one of the datasheet's
+	 * initialization triggers, and it is what makes the part re-run its
+	 * cable/energy detection after the reset. */
+	ret = phy_read(phydev, MDIO_CTRL1);
+	if (ret < 0)
+		return ret;
+	ret = phy_write(phydev, MDIO_CTRL1,
+			ret | BMCR_ANENABLE | BMCR_ANRESTART);
+	if (ret < 0)
+		return ret;
+
+	phydev_info(phydev,
+		    "datasheet bring-up done (0xa468=0003, reset, AN restart)\n");
 
 	return 0;
 }
