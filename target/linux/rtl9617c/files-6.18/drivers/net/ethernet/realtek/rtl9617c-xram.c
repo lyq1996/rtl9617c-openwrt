@@ -1409,6 +1409,23 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 		ret = phy_power_on(priv->sgmii);
 		if (ret)
 			goto put_phy;
+		/*
+		 * Program the lane for 2.5G right here, not only from
+		 * rtl_adjust_link(). rtl_pcie_lane_speed() is the only caller of
+		 * rtl_sgmii_link(), whose 2500 branch sets CDR_KP to 0x10 and
+		 * selects analog bank 0x400 (OEM __p4_sds_2g5_patch). But
+		 * rtl_adjust_link() runs only once the PHY reports link, and the
+		 * PHY cannot report link until the lane is in 2.5G mode -- so
+		 * leaving it to the link callback never converges. Measured on
+		 * the unit: with no link event, dmesg carries no "S3 speed" line
+		 * at all and 0x6f10 stays at its reset value.
+		 */
+		ret = phy_set_speed(priv->sgmii, SPEED_2500);
+		if (ret)
+			dev_warn(parent,
+				 "S3 2.5G lane programming failed: %d; continuing\n", ret);
+		else
+			priv->sgmii_speed = SPEED_2500;
 		ret = devm_add_action_or_reset(parent, rtl_sgmii_power_off, priv->sgmii);
 		if (ret)
 			goto put_phy;
