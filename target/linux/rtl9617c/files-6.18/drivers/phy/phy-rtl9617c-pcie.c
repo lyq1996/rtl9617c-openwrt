@@ -211,6 +211,9 @@ static struct phy *rtl_pcie_phy_xlate(struct device *dev, const struct of_phandl
 		return ERR_PTR(-EINVAL);
 	return controls->phys[args->args[0]];
 }
+static ssize_t sgmii_status_show(struct device *dev,
+				 struct device_attribute *attr, char *buf);
+static DEVICE_ATTR_RO(sgmii_status);
 static int rtl_pcie_controls_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -288,8 +291,41 @@ static int rtl_pcie_controls_probe(struct platform_device *pdev)
 		phy_set_drvdata(controls->phys[i], &controls->lanes[i]);
 	}
 	provider = devm_of_phy_provider_register(dev, rtl_pcie_phy_xlate);
-	return PTR_ERR_OR_ZERO(provider);
+	if (IS_ERR(provider))
+		return PTR_ERR(provider);
+	/* Diagnostics for the SGMII lane that carries the 2.5G jack. */
+	ret = device_create_file(dev, &dev_attr_sgmii_status);
+	if (ret)
+		dev_warn(dev, "sgmii_status attribute not created: %d\n", ret);
+	return 0;
 }
+
+/*
+ * SGMII lane diagnostics. GLOBAL_PHY_STATUS (phy_control + 0x08) carries the
+ * per-lane CKUSABLE bits and GLOBAL_PHY_SGMII_PCS_INFO (phy_control + 0x1c)
+ * carries sgmii_sds_link_ok (bit0), reg_rdy (bit1) and the 17-bit partner
+ * ability. Without these there is no way to tell whether the lane is
+ * receiving, which is the difference between "no frames because the copper
+ * side is idle" and "no frames because the lane never locked".
+ */
+static ssize_t sgmii_status_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+	u32 status = readl(controls->phy_control + 0x08);
+	u32 info = readl(controls->phy_control + 0x1c);
+	u32 misc = readl(controls->phy_control + 0x0c);
+	u32 pcs = readl(controls->phy_control + 0x10);
+
+	return sysfs_emit(buf,
+		"status=%08x info=%08x misc=%08x pcs=%08x "
+		"ckusable_sgmii=%u link_ok=%u reg_rdy=%u sdet=%u sts_upd_rx=%u "
+		"sym_err=%u partner=%05x\n",
+		status, info, misc, pcs,
+		(status >> 7) & 1, info & 1, (info >> 1) & 1, (info >> 2) & 1,
+		(info >> 3) & 1, (info >> 4) & 1, (info >> 5) & 0x1ffff);
+}
+
 static const struct of_device_id rtl_pcie_controls_match[] = {
 	{.compatible = "realtek,rtl9617c-pcie-controls"},
 	{},
