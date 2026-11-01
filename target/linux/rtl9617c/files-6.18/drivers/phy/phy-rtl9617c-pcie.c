@@ -214,6 +214,32 @@ static struct phy *rtl_pcie_phy_xlate(struct device *dev, const struct of_phandl
 static ssize_t sgmii_status_show(struct device *dev,
 				 struct device_attribute *attr, char *buf);
 static DEVICE_ATTR_RO(sgmii_status);
+
+/* Raw GLOBAL_PHY_SGMII_MISC_CONTROL access, for bringing the S3 lane's
+ * clock buffer / bandgap up while the lane is being diagnosed. */
+static ssize_t sgmii_misc_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%08x\n", readl(controls->phy_control + 0x0c));
+}
+
+static ssize_t sgmii_misc_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+	unsigned int value;
+	int ret = kstrtouint(buf, 0, &value);
+
+	if (ret)
+		return ret;
+	writel(value, controls->phy_control + 0x0c);
+	return count;
+}
+static DEVICE_ATTR_RW(sgmii_misc);
+
 static int rtl_pcie_controls_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -297,6 +323,9 @@ static int rtl_pcie_controls_probe(struct platform_device *pdev)
 	ret = device_create_file(dev, &dev_attr_sgmii_status);
 	if (ret)
 		dev_warn(dev, "sgmii_status attribute not created: %d\n", ret);
+	ret = device_create_file(dev, &dev_attr_sgmii_misc);
+	if (ret)
+		dev_warn(dev, "sgmii_misc attribute not created: %d\n", ret);
 	return 0;
 }
 
