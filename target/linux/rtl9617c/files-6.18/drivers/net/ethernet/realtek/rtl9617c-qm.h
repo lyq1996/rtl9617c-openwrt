@@ -56,6 +56,8 @@ struct rtl_qm_rx {
 
 int rtl_qm_rx_alloc(struct device *dev, struct rtl_qm_rx *rx);
 int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port);
+/* Build the ingress rule for a LAN port registered after rx_start(). */
+int rtl_qm_rx_add_port(struct rtl_qm_rx *rx, unsigned int port);
 void rtl_qm_rx_stop(struct rtl_qm_rx *rx);
 void rtl_qm_rx_free(struct device *dev, struct rtl_qm_rx *rx);
 int rtl_qm_rx_poll(struct rtl_qm_rx *rx, struct napi_struct *napi, int budget);

@@ -187,6 +187,23 @@ static int rtl_qm_ingress(struct rtl_qm_rx *rx, unsigned int port)
 	return 0;
 }
 
+/*
+ * rtl_qm_rx_start() only builds ingress rules for the LAN sources that are
+ * already registered when it runs, and it runs from rtl_engine_start()
+ * before rtl_register_lans(). A port registered later -- which is the case
+ * for the 2.5G jack, whose PHY init is deferred to a work item -- therefore
+ * never gets an LDPID/TCAM rule and its frames are dropped by the fabric.
+ * Call this once such a port has been registered.
+ */
+int rtl_qm_rx_add_port(struct rtl_qm_rx *rx, unsigned int port)
+{
+	if (port >= ARRAY_SIZE(rx->lan))
+		return -EINVAL;
+	if (!rx->deepq_configured)
+		return -EAGAIN;
+	return rtl_qm_ingress(rx, port);
+}
+
 static unsigned int rtl_qm_wifi_chunk_bytes(unsigned int chunk)
 {
 	return min_t(unsigned int, RTL_QM_PE_CHUNK_BUFFERS,
