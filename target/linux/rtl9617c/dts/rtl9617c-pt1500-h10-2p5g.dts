@@ -283,16 +283,16 @@
 	 * phylib use the indirect 0x0d/0x0e MMD registers. */
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
-		/* The RTL8221B has to be put into HiSGMII mode. Its power-on
-		 * values (0x6f10=0x084a / 0x6f11=0x0021) are NOT a golden
-		 * state: this unit reads exactly those while the QX lane stays
-		 * RXIDLE-with-BER and carries no frame in either direction.
+		/* Leave the RTL8221B in its own default mode. Measured on this
+		 * unit: after a software reset (BMCR bit15) the jack negotiates
+		 * 2.5Gbps/Full with the peer also reporting 2.5Gbps, while every
+		 * attempt to force the HiSGMII mode words killed the copper
+		 * link (0x6f10=0xd455 reads back 0x086a, 0xa434 bit2 never
+		 * sets, BMSR link stays clear).
 		 *
-		 * realtek,hsgmii runs the stock rtl8221b.ko bring-up
-		 * (Rtl8221_serdes_option_set_for_init, option 0), which writes
-		 * 0x6f10=0xd455 / 0x6f11=0x8020 and performs no force-down
-		 * request. realtek,no-vendor-finish keeps the TYFZA1-only
-		 * a408/a412/a5d4 finish off this board. */
+		 * realtek,hsgmii still selects this driver; the bring-up it
+		 * runs is now just that reset. realtek,no-vendor-finish keeps
+		 * the TYFZA1-only a408/a412/a5d4 finish off this board. */
 		realtek,hsgmii;
 		realtek,no-vendor-finish;
 	};

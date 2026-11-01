@@ -156,49 +156,35 @@ static int rtl8221b_load_patch(struct phy_device *phydev)
 
 static int rtl8221b_hsgmii(struct phy_device *phydev)
 {
-	int ret, val;
+	int ret;
 
 	/*
-	 * This follows the stock rtl8221b.ko Rtl8221_serdes_option_set_for_init
-	 * (option 0), disassembled from the OEM module at 0x3de0, rather than
-	 * the TYFZA1 reference sequence:
+	 * Measured on this unit: the jack reaches 2.5Gbps/Full with the peer
+	 * adapter also reporting 2.5Gbps when the RTL8221B is left in its own
+	 * default mode after a clean software reset. Every attempt to force
+	 * the HiSGMII mode words instead killed the copper link:
 	 *
-	 *   0x75f3 &= ~BIT(0)
-	 *   0x697a  = (0x697a & 0xffc0) | option      (option 0)
-	 *   0x6a04  = 0x0503                          (option 0 path)
-	 *   0x6f10  = 0xd455        <-- NOT 0xd433
-	 *   0x6f11  = 0x8020
+	 *   - with 0x6f10 = 0xd455 / 0x6f11 = 0x8020 (stock
+	 *     Rtl8221_serdes_option_set_for_init option 0, disassembled at
+	 *     0x3de0) the part reads back 0x086a / 0x0021 after init, 0xa434
+	 *     bit2 stays clear and BMSR link never asserts;
+	 *   - the TYFZA1 force-down handshake (0xa400 bit14 -> poll 0xa434
+	 *     bit2) never ACKs here either;
+	 *   - a software reset (BMCR bit15) brings the link up within ~3s,
+	 *     with C22 reg5 (link partner ability) reading 0xd741.
 	 *
-	 * and, crucially, the OEM init path performs no force-down request:
-	 * the 0xa400 bit14 toggle plus the 0xa434 bit2 ACK poll belong to
-	 * Rtl8221_serdes_option_set (0x3b8c), the runtime path, not to init.
-	 * On this unit that toggle never ACKs and leaves the line side down.
-	 *
-	 * The previous power-on values (0x6f10=0x084a / 0x6f11=0x0021) were
-	 * recorded here as a "golden state", but they are simply the reset
-	 * defaults: the unit reads exactly those while the lane stays
-	 * RXIDLE-with-BER and carries no frame, so they are not golden.
+	 * So do exactly what works: reset the part and leave its mode alone.
+	 * The lane is still programmed for 2.5G on the SoC side by
+	 * rtl_sgmii_link(), which is what carries the speed.
 	 */
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x75f3, BIT(0), 0);
+	ret = phy_write(phydev, MDIO_CTRL1, BMCR_RESET);
 	if (ret < 0)
 		return ret;
-	ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x697a, 0x3f, 0);
+	ret = phy_read_poll_timeout(phydev, MDIO_CTRL1, ret,
+				    !(ret & BMCR_RESET), 10000, 2000000, true);
 	if (ret < 0)
 		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6a04, 0x0503);
-	if (ret < 0)
-		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f10, 0xd455);
-	if (ret < 0)
-		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x6f11, 0x8020);
-	if (ret < 0)
-		return ret;
-
-	/* Read back so a silently rejected write is visible in the log. */
-	val = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f10);
-	phydev_info(phydev, "HiSGMII init: 6f10=%04x 6f11=%04x\n", val,
-		    phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x6f11));
+	phydev_info(phydev, "reset done, leaving PHY in its default copper mode\n");
 
 	return 0;
 }
