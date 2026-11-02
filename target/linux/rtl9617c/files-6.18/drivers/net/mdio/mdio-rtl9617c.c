@@ -14,6 +14,7 @@
 #include <linux/iopoll.h>
 #include <linux/mii.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of_mdio.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
@@ -39,9 +40,12 @@
 #define GPHY_CTRL13	0x34
 
 struct rtl9617c_mdio {
+	struct mii_bus *bus;
 	void __iomem *per;
 	void __iomem *ocp;
 	void __iomem *wrap;
+	/* Mapped length of the gphy-ocp window, used to bound vendor accesses. */
+	resource_size_t ocp_size;
 	/* Addresses served by the internal GPHY register window. */
 	u32 ocp_mask;
 	/* realtek,external-phys: when both paths answer, prefer the pins. */
@@ -174,8 +178,15 @@ static int rtl_mdio_read_c45(struct mii_bus *bus, int phy, int devad, int reg)
 	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, 0, true);
 }
 
-/* Indirect MMD access over Clause 22 (registers 0x0d/0x0e), which is how this
- * PHY is reached on the board's MDIO pins. */
+/*
+ * Indirect MMD access over Clause 22, registers 0x0d/0x0e. The caller must
+ * hold bus->mdio_lock across all four frames, not just each individual
+ * frame: phylib also changes the address/data selector on the same PHY.
+ *
+ * Retain the existing 50 us gaps for now so locking is the only transport
+ * change under test. Earlier unlocked observations do not establish that
+ * a delay is required, or that it fixes any MMD30 access problem.
+ */
 static int rtl_mdio_mmd(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
 			u16 value, bool read)
 {
@@ -184,13 +195,45 @@ static int rtl_mdio_mmd(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
 	ret = rtl_mdio_c22(mdio, phy, MII_MMD_CTRL, devad, false);
 	if (ret < 0)
 		return ret;
+	udelay(50);
 	ret = rtl_mdio_c22(mdio, phy, MII_MMD_DATA, reg, false);
 	if (ret < 0)
 		return ret;
+	udelay(50);
 	ret = rtl_mdio_c22(mdio, phy, MII_MMD_CTRL, 0x4000 | devad, false);
 	if (ret < 0)
 		return ret;
+	udelay(50);
 	return rtl_mdio_c22(mdio, phy, MII_MMD_DATA, value, read);
+}
+
+/*
+ * Vendor GPHY register window, as OEM ca-ne.ko addresses it in
+ * aal_mdio_read/aal_mdio_write (ca-ne.ko+0x15b5c / +0x16784):
+ *
+ *	addr = gphy_base + ((port - 1) << 18) + 0x29000 + devad * 8
+ *
+ * This window only covers the SoC's own GPHYs (port 1..4). An external part
+ * such as the 2.5G RTL8221B (port 6) does NOT live here: OEM reaches it
+ * through aal_mdio_read_indirect, which builds the ordinary Clause 45 word
+ * (PRTAD = port, DEVAD = devad) and is therefore the same path this driver
+ * already uses. Addressing port 6 through this window computes
+ * 5<<18 + 0x29000 = 0x169000, past the end of the 1 MiB mapping, and an
+ * access there faults the bus -- measured on this board as an immediate
+ * reset. Bound the offset against the mapped size so a mistyped command
+ * cannot take the machine down.
+ */
+static void __iomem *rtl_mdio_gphy(struct rtl9617c_mdio *mdio, int port,
+				   int devad)
+{
+	u32 offset;
+
+	if (!mdio->ocp || port < 1 || port > 4 || devad < 0 || devad > 31)
+		return NULL;
+	offset = ((u32)(port - 1) << 18) + 0x29000 + (u32)devad * 8;
+	if (offset + sizeof(u32) > mdio->ocp_size)
+		return NULL;
+	return mdio->ocp + offset;
 }
 
 /*
@@ -201,6 +244,8 @@ static int rtl_mdio_mmd(struct rtl9617c_mdio *mdio, int phy, int devad, int reg,
  *   mw <phy> <devad> <reg> <value>    indirect MMD write
  *   mr <phy> <devad> <reg>            indirect MMD read
  *   cr <phy> <devad> <reg>            direct Clause 45 read
+ *   gw <port> <devad> <reg> <value>   vendor GPHY window write
+ *   gr <port> <devad> <reg>           vendor GPHY window read
  *
  * The result of the last command is printed when the file is read.
  */
@@ -209,7 +254,8 @@ static ssize_t phyreg_show(struct device *dev, struct device_attribute *attr,
 {
 	struct rtl9617c_mdio *mdio = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "last=%08x (r/w p r [v], mr/mw p d r [v])\n",
+	return sysfs_emit(buf,
+			  "last=%08x (r/w p r [v], mr/mw p d r [v], gw/gr port d r [v])\n",
 			  mdio->last);
 }
 
@@ -223,12 +269,26 @@ static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
 
 	n = sscanf(buf, "%7s %li %li %li %li", op, &phy, &first, &second,
 		   &third);
-	/* r/w take a register and an optional value; mr/mw take a device
-	 * address and a register, then an optional value. */
-	if (n < 3 || phy > 31 || first > 31) {
+	/* r/w take a register and an optional value; mr/mw/cr take a device
+	 * address and a register; gr/gw take a GPHY port, devad and register.
+	 * Only the first two operands are bounded for every command, so the
+	 * devad/register limits are checked per branch below. */
+	if (n < 3 || phy > 31 || first > 255) {
 		mdio->last = 0xdead0000;
 		return count;
 	}
+	/* MMD device addresses and registers are 5 and 16 bits wide; the GPHY
+	 * window has its own (much wider) layout and is not bounded here. */
+	if (strcmp(op, "gr") && strcmp(op, "gw") && first > 31) {
+		mdio->last = 0xdead0000;
+		return count;
+	}
+
+	/* phy_read_mmd() holds this lock around its complete C22/C45 operation.
+	 * phyreg must do the same; otherwise its four-frame MMD sequence can be
+	 * interleaved with the PHY state machine and the page selector/data frame
+	 * no longer refer to the same register. */
+	mutex_lock(&mdio->bus->mdio_lock);
 	if (!strcmp(op, "r")) {
 		ret = rtl_mdio_c22(mdio, phy, first, 0, true);
 	} else if (!strcmp(op, "w") && n >= 4 && second <= 0xffff) {
@@ -240,10 +300,24 @@ static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
 	} else if (!strcmp(op, "mw") && n >= 5 && second <= 0xffff &&
 		   third <= 0xffff) {
 		ret = rtl_mdio_mmd(mdio, phy, first, second, third, false);
+	} else if (!strcmp(op, "gr") && n >= 4 && second <= 0xffff) {
+		void __iomem *p = rtl_mdio_gphy(mdio, phy, first);
+
+		ret = p ? (int)(readl(p) & 0xffff) : -ENODEV;
+	} else if (!strcmp(op, "gw") && n >= 5 && second <= 0xffff &&
+		   third <= 0xffff) {
+		void __iomem *p = rtl_mdio_gphy(mdio, phy, first);
+
+		if (p)
+			writel(third, p);
+		ret = p ? 0 : -ENODEV;
 	} else {
+		mutex_unlock(&mdio->bus->mdio_lock);
 		mdio->last = 0xdead0001;
 		return count;
 	}
+	mutex_unlock(&mdio->bus->mdio_lock);
+
 	mdio->last = ret < 0 ? (0xbad00000 | (u32)-ret) : (u32)ret;
 	dev_info(dev, "phyreg %s: %08x\n", op, mdio->last);
 
@@ -324,17 +398,20 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct rtl9617c_mdio *mdio;
 	struct mii_bus *bus;
+	int ret;
 
 	bus = devm_mdiobus_alloc_size(dev, sizeof(*mdio));
 	if (!bus)
 		return -ENOMEM;
 	mdio = bus->priv;
+	mdio->bus = bus;
 	mdio->per = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mdio->per))
 		return PTR_ERR(mdio->per);
 	mdio->ocp = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(mdio->ocp))
 		return PTR_ERR(mdio->ocp);
+	mdio->ocp_size = resource_size(platform_get_resource(pdev, IORESOURCE_MEM, 1));
 	mdio->wrap = devm_platform_ioremap_resource(pdev, 2);
 	if (IS_ERR(mdio->wrap))
 		return PTR_ERR(mdio->wrap);
@@ -357,8 +434,11 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	dev_info(dev, "MDIO bus ready, internal OCP addresses mask %08x\n",
 		 mdio->ocp_mask);
 	platform_set_drvdata(pdev, mdio);
+	ret = devm_of_mdiobus_register(dev, bus, dev->of_node);
+	if (ret)
+		return ret;
 	device_create_file(dev, &dev_attr_phyreg);
-	return devm_of_mdiobus_register(dev, bus, dev->of_node);
+	return 0;
 }
 
 static const struct of_device_id rtl_mdio_match[] = {
