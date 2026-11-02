@@ -14,6 +14,40 @@ struct rtl8221b_reg {
 
 #include "rtl8221b-tyfza1-patch.h"
 
+/*
+ * MMD access for this part.
+ *
+ * Upstream rtl822xb_read_mmd()/rtl822xb_write_mmd() reach MDIO_MMD_VEND2
+ * through the RTL821x page-select register (C22 0x1f) for every register
+ * outside 0xA400..0xA43C. That window does not carry the RTL8221B SerDes
+ * block: reading 0x7580 as page 0x758 / offset 0x10 returns 0, while the
+ * IEEE 802.3 MMD indirect sequence (C22 0x0d/0x0e) returns the real value.
+ *
+ * Measured on the PT1500 at the same instant:
+ *	page path:  page=0x758, reg 0x10 -> 0x0000
+ *	MMD path :  MMD30.0x7580         -> 0x9412
+ *
+ * The consequence of the page path is not a cosmetic misread: the PHY state
+ * machine's read_status() times out (-110), phydev->link never becomes 1,
+ * rtl_adjust_link() therefore never calls phy_set_speed(), and the SoC S3
+ * lane keeps whatever the bootloader left behind (sdet=0, jack dead).
+ *
+ * Use the MMD indirect sequence for every devad. mmd_phy_read()/_write()
+ * take bus->mdio_lock themselves, so this composes with phylib.
+ */
+static int rtl8221b_read_mmd(struct phy_device *phydev, int devnum, u16 reg)
+{
+	return mmd_phy_read(phydev->mdio.bus, phydev->mdio.addr,
+			    phydev->is_c45, devnum, reg);
+}
+
+static int rtl8221b_write_mmd(struct phy_device *phydev, int devnum, u16 reg,
+			      u16 val)
+{
+	return mmd_phy_write(phydev->mdio.bus, phydev->mdio.addr,
+			     phydev->is_c45, devnum, reg, val);
+}
+
 static int rtl8221b_write_regs(struct phy_device *phydev,
 			       const struct rtl8221b_reg *regs, unsigned int count)
 {
@@ -52,15 +86,33 @@ static int rtl8221b_wait_ready(struct phy_device *phydev)
 					val, (val & 3) == 3, 2000, 1500000, false);
 }
 
+/*
+ * Vendor patch load.
+ *
+ * OEM Rtl8221_phy_init (rtl8221b.ko+0x4a88) gates this on MMD3.0x0003:
+ * it loads the full patch only when (v & 0xF) == 8 and ((v >> 4) & 0x3F) == 4,
+ * i.e. v & 0xFF == 0x48. Measured on this unit, MMD3.0x0003 reads 0xC849,
+ * whose low byte is 0x49 -- one bit off -- so the OEM gate sends even the
+ * stock firmware down the else branch, whose only action is a write to
+ * MMD30.0x75B5. That write does not land on this part (every MMD30 register
+ * reads back 0xDEAD over both Clause 22 and Clause 45), so on the stock
+ * firmware the vendor patch is never applied either.
+ *
+ * The patch content is not revision-specific: it is a RAM/analog tuning
+ * table, and the reachable MMD31 sequence that follows it in the OEM driver
+ * is what the part needs to bring its SerDes up. Load it unconditionally and
+ * keep the revision in the log so the decision stays visible.
+ */
 static int rtl8221b_load_patch(struct phy_device *phydev)
 {
-	int ret, val;
+	int ret, val, rev;
 
-	val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MII_PHYSID2);
-	if (val < 0)
-		return val;
-	if ((val & 0x3ff) != 0x048)
-		return rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x75b5, 0xf, 4);
+	rev = phy_read_mmd(phydev, MDIO_MMD_PCS, 0x0003);
+	if (rev < 0)
+		return rev;
+	phydev_info(phydev,
+		    "vendor patch: MMD3.0x0003=0x%04x (OEM gate wants 0x??48, %s)\n",
+		    rev, (rev & 0xff) == 0x48 ? "match" : "mismatch - loading anyway");
 
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa436, 0x801e);
 	if (ret < 0)
@@ -136,22 +188,164 @@ static int rtl8221b_load_patch(struct phy_device *phydev)
 	ret = rtl8221b_write_regs(phydev, rtl8221b_patch_analog, ARRAY_SIZE(rtl8221b_patch_analog));
 	if (ret < 0)
 		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x75b5, 0xe086);
-	if (ret < 0)
-		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x75b6, 0x0024);
-	if (ret < 0)
-		return ret;
-	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x75b1, 0x0013);
-	if (ret < 0)
-		return ret;
+	/*
+	 * OEM writes 0x75B5/0x75B6/0x75B1 here, but those live in MMD30, which
+	 * does not answer on this board (all MMD30 registers read back 0xDEAD
+	 * over Clause 22 and Clause 45). The equivalent tuning is reachable in
+	 * MMD31 and is applied by rtl8221b_vendor_mmd31() below.
+	 */
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa436, 0x801e);
 	if (ret < 0)
 		return ret;
 	ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa438, 0x20);
 	if (ret < 0)
 		return ret;
-	return phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa400, 0x9200);
+	/*
+	 * OEM closes its init with 0xA400 = 0x9200. In the datasheet 0xA400 is
+	 * FEDCR, whose bits 15, 12 and 9 are all Reserved -- 0x9200 sets three
+	 * reserved bits and nothing documented. Measured on this unit with it
+	 * enabled: BMCR read 0x9000 afterwards (reset bit still asserted,
+	 * autoneg off) and the copper link never came back, so it is the prime
+	 * suspect for the dead PHY. Keep it behind a property.
+	 */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,vendor-a400"))
+		return phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa400, 0x9200);
+	return 0;
+}
+
+/*
+ * Enable the PHY's SerDes clock.
+ *
+ * MMD30.0x7581 bit4 is "SERDES Clock Enable": 1 = enabled, 0 = disabled, and
+ * the datasheet warns that misuse causes SERDES malfunction. Read once from
+ * this unit it came back 0x0000 -- clock off -- while the same read showed
+ * 0x7580 = 0x9412 (PHY-side, no isolation, no forced link-down, mode 0x12 =
+ * HiSGMII, matching the SoC's sds_mode0) and 0x758D = 0x0002 (bit1 SERDES
+ * Link OK set). So the mode and the link are fine and only the clock is off,
+ * which is exactly what makes the SoC report sdet=0 while the copper side
+ * works.
+ *
+ * MMD30 is only intermittently reachable on this board -- 7 of 30 reads
+ * returned a real value, the rest 0xDEAD or ETIMEDOUT, and 400 later attempts
+ * returned none. The reachable window appears shortly after the PHY is
+ * powered and the vendor patch has been loaded, so retry here rather than
+ * once: config_init runs inside that window.
+ */
+static int rtl8221b_serdes_clock_enable(struct phy_device *phydev)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < 32; i++) {
+		ret = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x7581);
+		if (ret >= 0 && ret != 0xdead) {
+			if (ret & BIT(4)) {
+				phydev_info(phydev,
+					    "SerDes clock already enabled (0x7581=0x%04x)\n",
+					    ret);
+				return 0;
+			}
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, 0x7581,
+					    ret | BIT(4));
+			if (ret < 0)
+				return ret;
+			ret = phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x7581);
+			phydev_info(phydev,
+				    "SerDes clock enable: wrote 0x7581 bit4, readback 0x%04x\n",
+				    ret);
+			return ret < 0 ? ret : 0;
+		}
+		usleep_range(1000, 2000);
+	}
+	phydev_warn(phydev, "SerDes clock: MMD30.0x7581 unreachable after 32 tries\n");
+	return 0;
+}
+
+/*
+ * The MMD31 half of OEM Rtl8221_phy_init (rtl8221b.ko+0x4a88).
+ *
+ * The OEM driver issues 110 MMD31 operations and only 5 MMD30 ones; every
+ * value below is copied from that sequence in its original order. These are
+ * the registers that actually configure the part's analog/PCS blocks, and
+ * unlike MMD30 they are all reachable here. Registers the earlier patch
+ * tables already cover (0xA436/0xA438 window setup, 0xB820/0xB82E/0xB892/
+ * 0xB896, 0xA412, 0xA5D4) are left where they are to keep the ordering that
+ * was measured to work; the remainder is added here.
+ */
+static const struct rtl8221b_reg rtl8221b_vendor_mmd31_regs[] = {
+	{ 0xa46a, 0x0302 },
+	{ 0xac46, 0xb794 },
+	{ 0xa412, 0x0200 },
+	{ 0xa5d4, 0x0081 },
+	{ 0xad30, 0x0a57 },
+	{ 0xad30, 0x0a55 },
+	{ 0xb87c, 0x80f5 },
+	{ 0xb87e, 0x760e },
+	{ 0xb87c, 0x8107 },
+	{ 0xb87e, 0x360e },
+	{ 0xb87c, 0x8551 },
+	{ 0xb87e, 0x080e },
+	{ 0xbf00, 0xb202 },
+	{ 0xbf46, 0x0300 },
+	{ 0xa4ca, 0x6a50 },
+	{ 0xd12a, 0x8000 },
+	{ 0xd12c, 0x8000 },
+	{ 0xd144, 0x8000 },
+	{ 0xd146, 0x8000 },
+	{ 0xbf84, 0xac00 },
+};
+
+/* 0xA436/0xA438 indirect-window writes from the same OEM sequence. */
+static const struct rtl8221b_reg rtl8221b_vendor_window[] = {
+	{ 0x8044, 0x240f }, { 0x804a, 0x240f }, { 0x8050, 0x240f },
+	{ 0x8056, 0x240f }, { 0x805c, 0x240f }, { 0x8062, 0x240f },
+	{ 0x8068, 0x240f }, { 0x806e, 0x240f }, { 0x8074, 0x240f },
+	{ 0x807a, 0x240f },
+	{ 0x8045, 0x1700 }, { 0x804b, 0x1700 }, { 0x8051, 0x1700 },
+	{ 0x8057, 0x1700 }, { 0x805d, 0x1700 }, { 0x8063, 0x1700 },
+	{ 0x8069, 0x1700 }, { 0x806f, 0x1700 }, { 0x8075, 0x1700 },
+	{ 0x807b, 0x1700 },
+	{ 0x8ff4, 0x0000 }, { 0x8ff6, 0x03e8 }, { 0x8ff8, 0x8000 },
+	{ 0x8ffa, 0x8000 }, { 0x8ffc, 0x8000 }, { 0x8ffe, 0x8000 },
+	{ 0x8015, 0xf9bf }, { 0x8170, 0xd8a0 },
+};
+
+static int rtl8221b_vendor_mmd31_apply(struct phy_device *phydev)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(rtl8221b_vendor_mmd31_regs); i++) {
+		ret = phy_write_mmd(phydev, MDIO_MMD_VEND2,
+				    rtl8221b_vendor_mmd31_regs[i].reg,
+				    rtl8221b_vendor_mmd31_regs[i].value);
+		if (ret < 0)
+			return ret;
+	}
+	/*
+	 * The 0xA436/0xA438 indirect window writes are skipped: with them the
+	 * copper link never returned (PHYSR stuck at 0x1600, MDI Plug clear),
+	 * and they touch the analog front end rather than the SerDes mode, so
+	 * they are the most likely culprit. The direct MMD31 writes above are
+	 * the ones that match the OEM sequence's register set.
+	 */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,vendor-window")) {
+		for (i = 0; i < ARRAY_SIZE(rtl8221b_vendor_window); i++) {
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa436,
+					    rtl8221b_vendor_window[i].reg);
+			if (ret < 0)
+				return ret;
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, 0xa438,
+					    rtl8221b_vendor_window[i].value);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	phydev_info(phydev, "vendor MMD31 sequence applied (%zu regs)\n",
+		    ARRAY_SIZE(rtl8221b_vendor_mmd31_regs));
+	return 0;
 }
 
 static int rtl8221b_hsgmii(struct phy_device *phydev)
@@ -189,13 +383,22 @@ static int rtl8221b_hsgmii(struct phy_device *phydev)
 			return ret;
 	}
 
+	/*
+	 * Software reset. Measured with the vendor patch loaded: the part needs
+	 * well over the 2 s this used to allow before it clears BMCR.RESET, and
+	 * the -ETIMEDOUT that produced aborted the whole function, so autoneg
+	 * was never restarted and the copper link stayed dead (PHYSR 0x1600,
+	 * BMCR 0x9000 with the reset bit still set). Allow 10 s and keep going
+	 * even if the bit is still set, so a slow part cannot cost the link.
+	 */
 	ret = phy_write(phydev, MDIO_CTRL1, BMCR_RESET);
 	if (ret < 0)
 		return ret;
 	ret = phy_read_poll_timeout(phydev, MDIO_CTRL1, val,
-				    !(val & BMCR_RESET), 10000, 2000000, true);
+				    !(val & BMCR_RESET), 20000, 10000000, true);
 	if (ret < 0)
-		return ret;
+		phydev_warn(phydev, "BMCR reset did not self-clear (%d), continuing\n",
+			    ret);
 
 	/* Restart auto-negotiation is itself one of the datasheet's
 	 * initialization triggers, and it is what makes the part re-run its
@@ -238,7 +441,9 @@ static int rtl8221b_tyfza1_resume(struct phy_device *phydev)
 	if (ret < 0)
 		return ret;
 	if (of_property_read_bool(phydev->mdio.dev.of_node,
-				  "realtek,hsgmii-init-off"))
+				  "realtek,hsgmii-init-off") ||
+	    of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,no-vendor-finish"))
 		return 0;
 	return rtl8221b_tyfza1_finish(phydev);
 }
@@ -276,9 +481,32 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 	ret = rtl8221b_wait_ready(phydev);
 	if (ret < 0)
 		goto error;
-	ret = rtl8221b_load_patch(phydev);
-	if (ret < 0)
-		goto error;
+	/*
+	 * Loading the vendor patch is off by default.
+	 *
+	 * Measured on this board: with the patch loaded BMCR reads 0x9000 (reset
+	 * bit stuck) and PHYSR parks at 0x1600 (bit13 MDI Plug clear -- the part
+	 * believes no cable is plugged in), and the copper link never comes back.
+	 * Without it the same registers reach 0x1140 / 0x13DC with the link up at
+	 * 2.5G. Opt in with realtek,vendor-patch when bisecting.
+	 */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,vendor-patch")) {
+		ret = rtl8221b_load_patch(phydev);
+		if (ret < 0)
+			goto error;
+	}
+	/* The clock write is experimental and is off in the baseline. Enable it
+	 * explicitly with realtek,serdes-clock-enable after a locked measurement
+	 * proves that MMD30.0x7581 is the missing control. */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,serdes-clock-enable")) {
+		ret = rtl8221b_serdes_clock_enable(phydev);
+		if (ret < 0)
+			phydev_warn(phydev,
+				    "SerDes clock enable failed (%d), continuing\n",
+				    ret);
+	}
 	/* Original init disables the copper PHY before changing its SerDes mode.
 	 * phylib's resume callback enables it after a successful attach. */
 	ret = rtl8221b_update(phydev, MDIO_MMD_PMAPMD, MDIO_CTRL1, 0, MDIO_CTRL1_LPOWER);
@@ -295,6 +523,27 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 		phydev_warn(phydev, "HiSGMII bring-up incomplete (%d), continuing\n",
 			    ret);
 		ret = 0;
+	}
+	/*
+	 * The reachable half of the OEM cold-init sequence.
+	 *
+	 * Measured on this unit with the sequence enabled: PHYSR went from
+	 * 0x13DC (copper link up, 2.5G full) to 0x1600 and then 0x00A0, i.e.
+	 * the copper link was lost and never came back, and BMCR read 0x9000
+	 * (reset still asserted, autoneg off). So at least one write in here is
+	 * wrong for this board. Keep it behind a DT property so the default
+	 * build keeps the previously-working copper behaviour and the sequence
+	 * can be bisected from the device without a rebuild each time.
+	 */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,vendor-mmd31")) {
+		ret = rtl8221b_vendor_mmd31_apply(phydev);
+		if (ret < 0) {
+			phydev_warn(phydev,
+				    "vendor MMD31 sequence failed (%d), continuing\n",
+				    ret);
+			ret = 0;
+		}
 	}
 	/* PT1500 keeps the PHY's own post-link state; the a408/a412/a5d4
 	 * finish is only used by the TYFZA1 reference. */

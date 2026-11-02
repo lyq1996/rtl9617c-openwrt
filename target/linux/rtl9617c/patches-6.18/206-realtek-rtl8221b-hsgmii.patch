@@ -5,6 +5,16 @@ Register the board-specific RTL8221B match for the TYFZA1 2.5G port,
 including the cold PHY initialization after the GPIO128 reset and the
 vendor GPIO14 handoff that the generic entry omits.
 
+The entry uses its own read_mmd/write_mmd so every devad is reached through
+the IEEE 802.3 MMD indirect sequence (C22 0x0d/0x0e). Upstream's
+rtl822xb_read_mmd() sends MDIO_MMD_VEND2 registers outside 0xA400..0xA43C
+through the RTL821x page-select window instead, and that window does not
+carry this part's SerDes block: reading 0x7580 as page 0x758 / offset 0x10
+returns 0 where the MMD path returns 0x9412. With the page path the state
+machine's read_status() times out (-110), phydev->link never becomes 1,
+rtl_adjust_link() never calls phy_set_speed(), and the SoC S3 lane keeps
+whatever the bootloader left behind, so the 2.5G jack never passes traffic.
+
 Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
 ---
 --- a/drivers/net/phy/realtek/realtek_main.c
@@ -25,8 +35,8 @@ Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
 +		.read_status	= rtl822x_c45_read_status,
 +		.suspend	= genphy_c45_pma_suspend,
 +		.resume		= rtl8221b_tyfza1_resume,
-+		.read_mmd	= rtl822xb_read_mmd,
-+		.write_mmd	= rtl822xb_write_mmd,
++		.read_mmd	= rtl8221b_read_mmd,
++		.write_mmd	= rtl8221b_write_mmd,
 +	},
  	{
  		PHY_ID_MATCH_EXACT(0x00008201),
