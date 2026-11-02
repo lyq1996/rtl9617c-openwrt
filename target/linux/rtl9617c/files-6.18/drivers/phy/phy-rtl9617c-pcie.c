@@ -21,6 +21,13 @@ struct rtl_pcie_lane {
 struct rtl_pcie_controls {
 	void __iomem *core_reset, *phy_reset, *phy_control, *power, *usb_reset;
 	void __iomem *sgmii_analog, *sgmii_serdes;
+	/* SGMII_LP block (0xf433a000); OEM reads its lane status at +0xf4. */
+	void __iomem *sgmii_lp;
+	/* Mapped lengths, used to bound the phy_win diagnostic window. */
+	size_t phy_control_size, power_size, sgmii_analog_size;
+	size_t sgmii_serdes_size, sgmii_lp_size;
+	/* Last value touched through the phy_win diagnostic attribute. */
+	u32 win_last;
 	struct regmap *global_config;
 	spinlock_t lock;
 	u32 powered_lanes;
@@ -230,15 +237,137 @@ static ssize_t sgmii_misc_store(struct device *dev,
 				const char *buf, size_t count)
 {
 	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+	unsigned long flags;
 	unsigned int value;
 	int ret = kstrtouint(buf, 0, &value);
 
 	if (ret)
 		return ret;
+	/* Same register the lane bring-up rewrites; serialize with it. */
+	spin_lock_irqsave(&controls->lock, flags);
 	writel(value, controls->phy_control + 0x0c);
+	spin_unlock_irqrestore(&controls->lock, flags);
 	return count;
 }
 static DEVICE_ATTR_RW(sgmii_misc);
+
+/*
+ * GLOBAL_PHY_ISO_POWER_CTRL (the "power" resource). The S3 lane that carries
+ * the 2.5G SGMII PHY has s3_CPHY_ISOLATE (bit 5) and s3_ISO_ANA_B (bit 19);
+ * while either isolates the analog block the lane cannot transmit or receive,
+ * which is exactly the symptom seen on the 2.5G jack. Expose the raw word so
+ * the isolation state can be read and cleared from userspace.
+ */
+static ssize_t phy_power_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%08x\n", readl(controls->power));
+}
+
+static ssize_t phy_power_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+	unsigned long flags;
+	unsigned int value;
+	int ret = kstrtouint(buf, 0, &value);
+
+	if (ret)
+		return ret;
+	/* Share the lane lock: this register also holds every lane's power and
+	 * isolation bits, so an unlocked write races rtl_pcie_lane_power(). */
+	spin_lock_irqsave(&controls->lock, flags);
+	writel(value, controls->power);
+	spin_unlock_irqrestore(&controls->lock, flags);
+	return count;
+}
+static DEVICE_ATTR_RW(phy_power);
+
+/*
+ * Generic word access to every mapped block, for bring-up work:
+ *
+ *   echo "<block> <offset> [value]" > phy_win
+ *
+ * Block names are the DT reg-names. A read stores the value, which is
+ * printed by reading the file. This exists so a candidate register can be
+ * inspected from the device without a rebuild each time; it is a diagnostic
+ * aid, not part of normal operation.
+ *
+ * Offsets are bounded per block by that block's mapped length: the resources
+ * are not all 4 KiB (power is 4 bytes, phy-control 0x20), so a single
+ * "offset < 0x1000" test would let a mistyped command read or write past the
+ * ioremap and fault the bus.
+ */
+struct rtl_win_block {
+	const char *name;
+	size_t size;
+};
+
+static void __iomem *rtl_win_block(struct rtl_pcie_controls *controls,
+				   const char *name, size_t *size)
+{
+	if (!strcmp(name, "phy-control")) {
+		*size = controls->phy_control_size;
+		return controls->phy_control;
+	}
+	if (!strcmp(name, "power")) {
+		*size = controls->power_size;
+		return controls->power;
+	}
+	if (!strcmp(name, "sgmii-analog")) {
+		*size = controls->sgmii_analog_size;
+		return controls->sgmii_analog;
+	}
+	if (!strcmp(name, "sgmii-serdes")) {
+		*size = controls->sgmii_serdes_size;
+		return controls->sgmii_serdes;
+	}
+	if (!strcmp(name, "sgmii-lp")) {
+		*size = controls->sgmii_lp_size;
+		return controls->sgmii_lp;
+	}
+	return NULL;
+}
+
+static ssize_t phy_win_show(struct device *dev, struct device_attribute *attr,
+			    char *buf)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%08x\n", controls->win_last);
+}
+
+static ssize_t phy_win_store(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
+{
+	struct rtl_pcie_controls *controls = dev_get_drvdata(dev);
+	unsigned long flags;
+	char name[32] = "";
+	unsigned int off = 0, val = 0;
+	size_t size = 0;
+	void __iomem *blk;
+	int n;
+
+	n = sscanf(buf, "%31s %x %x", name, &off, &val);
+	if (n < 2 || (off & 3))
+		return -EINVAL;
+	blk = rtl_win_block(controls, name, &size);
+	if (!blk)
+		return -ENODEV;
+	/* Bound against this block's own length, not a blanket 0x1000. */
+	if ((size_t)off + sizeof(u32) > size)
+		return -EINVAL;
+	spin_lock_irqsave(&controls->lock, flags);
+	if (n >= 3)
+		writel(val, blk + off);
+	controls->win_last = readl(blk + off);
+	spin_unlock_irqrestore(&controls->lock, flags);
+	return count;
+}
+static DEVICE_ATTR_RW(phy_win);
 
 static int rtl_pcie_controls_probe(struct platform_device *pdev)
 {
@@ -272,9 +401,29 @@ static int rtl_pcie_controls_probe(struct platform_device *pdev)
 	controls->sgmii_analog = devm_platform_ioremap_resource_byname(pdev, "sgmii-analog");
 	if (IS_ERR(controls->sgmii_analog))
 		return PTR_ERR(controls->sgmii_analog);
+	/*
+	 * SGMII_LP (0xf433a000) is a different block from SGMII_HP
+	 * (0xf433b000, mapped as sgmii-analog). OEM ca-ne.ko takes the lane
+	 * link status from SGMII_LP + 0xf4 (__p4_sds_status_get,
+	 * ca-ne.ko+0x1b080), so map it too; optional so older trees boot.
+	 */
+	controls->sgmii_lp = devm_platform_ioremap_resource_byname(pdev, "sgmii-lp");
+	if (IS_ERR(controls->sgmii_lp))
+		controls->sgmii_lp = NULL;
 	controls->sgmii_serdes = devm_platform_ioremap_resource_byname(pdev, "sgmii-serdes");
 	if (IS_ERR(controls->sgmii_serdes))
 		return PTR_ERR(controls->sgmii_serdes);
+	/* Record each block's mapped length for the phy_win bounds check. */
+	controls->phy_control_size =
+		resource_size(platform_get_resource_byname(pdev, IORESOURCE_MEM, "phy-control"));
+	controls->power_size =
+		resource_size(platform_get_resource_byname(pdev, IORESOURCE_MEM, "power"));
+	controls->sgmii_analog_size =
+		resource_size(platform_get_resource_byname(pdev, IORESOURCE_MEM, "sgmii-analog"));
+	controls->sgmii_serdes_size =
+		resource_size(platform_get_resource_byname(pdev, IORESOURCE_MEM, "sgmii-serdes"));
+	controls->sgmii_lp_size = controls->sgmii_lp ?
+		resource_size(platform_get_resource_byname(pdev, IORESOURCE_MEM, "sgmii-lp")) : 0;
 	spin_lock_init(&controls->lock);
 	platform_set_drvdata(pdev, controls);
 	controls->clocks = devm_kzalloc(dev, struct_size(controls->clocks, hws, 2), GFP_KERNEL);
@@ -326,6 +475,12 @@ static int rtl_pcie_controls_probe(struct platform_device *pdev)
 	ret = device_create_file(dev, &dev_attr_sgmii_misc);
 	if (ret)
 		dev_warn(dev, "sgmii_misc attribute not created: %d\n", ret);
+	ret = device_create_file(dev, &dev_attr_phy_power);
+	if (ret)
+		dev_warn(dev, "phy_power attribute not created: %d\n", ret);
+	ret = device_create_file(dev, &dev_attr_phy_win);
+	if (ret)
+		dev_warn(dev, "phy_win attribute not created: %d\n", ret);
 	return 0;
 }
 
@@ -345,14 +500,24 @@ static ssize_t sgmii_status_show(struct device *dev,
 	u32 info = readl(controls->phy_control + 0x1c);
 	u32 misc = readl(controls->phy_control + 0x0c);
 	u32 pcs = readl(controls->phy_control + 0x10);
+	/*
+	 * OEM ca-ne.ko reads the lane status from SGMII_LP_REGS + 0xf4, not
+	 * from GLOBAL_PHY_SGMII_PCS_INFO (__p4_sds_status_get, ca-ne.ko+0x1b080):
+	 * bit8 -> link, bit4 -> flag, bit0 -> flag. The PCS_INFO fields are all
+	 * named *_s0, so they describe the s0 channel while this board routes
+	 * the 2.5G PHY over s3 (s3_pcie_usb3_sgmii_sel = 2). Read the OEM
+	 * register too so the two can be compared.
+	 */
+	u32 lp = controls->sgmii_lp ? readl(controls->sgmii_lp + 0xf4) : 0;
 
 	return sysfs_emit(buf,
-		"status=%08x info=%08x misc=%08x pcs=%08x "
+		"status=%08x info=%08x misc=%08x pcs=%08x lp=%08x "
 		"ckusable_sgmii=%u link_ok=%u reg_rdy=%u sdet=%u sts_upd_rx=%u "
-		"sym_err=%u partner=%05x\n",
-		status, info, misc, pcs,
+		"sym_err=%u partner=%05x lp_link=%u lp_b4=%u lp_b0=%u\n",
+		status, info, misc, pcs, lp,
 		(status >> 7) & 1, info & 1, (info >> 1) & 1, (info >> 2) & 1,
-		(info >> 3) & 1, (info >> 4) & 1, (info >> 5) & 0x1ffff);
+		(info >> 3) & 1, (info >> 4) & 1, (info >> 5) & 0x1ffff,
+		(lp >> 8) & 1, (lp >> 4) & 1, lp & 1);
 }
 
 static const struct of_device_id rtl_pcie_controls_match[] = {
