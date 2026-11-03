@@ -100,9 +100,13 @@ struct rtl_lan {
 #define XGE_MAC_CFG_TX_2	0xb20c
 #define XGE_MISC_CONFIG		0xb2a8
 #define NITX_MISC_CFG		0xa1f4
-/* NI_HV_GLB_INTF_RST_CONFIG: bit21 = mac_rst_p6, bits 4/10/16 = the
- * interface / MAC rx / MAC tx resets of the port slot P6 occupies. */
+/* P6 has its own XGE reset (bit21), not the GE port/reset triplets. */
 #define NI_GLB_INTF_RST_CONFIG	0xa008
+/* NI_HV_GLB_XGE_BYPASS_CFG (RTL9617C registers.h):
+ * cos[2:0], dpq[3], dpid[9:4], mirror[10], no-drop[11], enable[12]. */
+#define NI_XGE_BYPASS_CFG	0xa040
+#define NI_XGE_BYPASS_FIELDS	GENMASK(12, 0)
+#define NI_XGE_BYPASS_CPU0	(BIT(12) | (16U << 4) | BIT(3))
 #define L2TM_ES_CTRL		0x2300
 #define QM_ES_CTRL		0x6108
 
@@ -130,6 +134,8 @@ struct rtl_xram {
 	void __iomem *p6_serdes;
 	struct rtl_p6_profile p6_profile[2];
 	bool p6_started;
+	u32 p6_rx_bypass_saved;
+	bool p6_rx_bypass_active;
 	struct phy *sgmii;
 	unsigned int sgmii_speed;
 	struct tyfza1_led phy_led;
@@ -146,7 +152,6 @@ struct rtl_xram {
 	bool rx_active;
 	u32 port;
 	u32 qx_last;
-	u32 ni_last;
 	bool tx_pending;
 	unsigned int tx_length;
 	u8 tx_buffer[2048];
@@ -923,15 +928,22 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	rtl_update(priv, 0xb208, BIT(4) | BIT(5) | 0x31, 0x31);
 	/* 0xb240 is 0x0000ffff on the reference unit and is never written by
 	 * ca-ne.ko; leave it at the hardware default. */
-	rtl_update(priv, 0xa5f8 + PORT_STRIDE * 4, BIT(8) | BIT(9), BIT(9));
 
 	/*
-	 * The P6 port block's receive MAC is left disabled by reset: at
-	 * 0xa5c8 + 0x90 * 4 the RXMAC_CFG word reads 0x00001100, i.e. rx_en
-	 * (bit0) clear, while the working 1G ports read 0x00001101. Without
-	 * it the XGE MAC never presents a receive stream.
+	 * Earlier revisions also wrote the GE port slot 4 words
+	 * (0xa5f8 and 0xa5c8 plus PORT_STRIDE * 4) on the assumption that
+	 * P6 occupies GE slot 4. Measured on hardware: clearing 0xa838 bit 9
+	 * back to bit 8 and clearing 0xa778 bit 0 both left the 2.5G jack
+	 * passing traffic unchanged (3/3 reply, both directions). Those words
+	 * belong to GE slot 4 and are not P6's CPU ingress, so they are gone.
+	 *
+	 * P6 lives at the XGE block 0xb200; its CPU ingress is
+	 * NI_HV_GLB_XGE_BYPASS_CFG, armed in rtl_engine_start() once the
+	 * native QM receive pool exists. Do not extrapolate the GE 0x90
+	 * stride onto P6: 0xa920 is NI_HV_INTPT_RX_CNTRL_CFG and the words
+	 * after it are internal-port RX counters, not a P6 port bank. Writing
+	 * them is an out-of-bounds alias and has panicked this kernel.
 	 */
-	rtl_update(priv, 0xa5c8 + PORT_STRIDE * 4, BIT(0), BIT(0));
 
 	/*
 	 * Release the interface/MAC resets for the P6 port slot. The reset
@@ -955,9 +967,8 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	rtl_p6_mac_iface_select(priv);
 
 	dev_info(priv->netdev->dev.parent,
-		 "P6 rx mux: xge=%08x port4=%08x misc=%08x rst=%08x\n",
+		 "P6 rx mux: xge=%08x misc=%08x rst=%08x\n",
 		 readl(priv->ni + 0xb204),
-		 readl(priv->ni + 0xa5f8 + PORT_STRIDE * 4),
 		 readl(priv->ni + XGE_MISC_CONFIG),
 		 readl(priv->ni + NI_GLB_INTF_RST_CONFIG));
 }
@@ -1127,10 +1138,27 @@ static int rtl_engine_start(struct rtl_xram *priv)
 			rtl_dma_tx_stop(&priv->dma);
 			return ret;
 		}
+		/* Native LAN RX goes directly to the CPU16 receive pool. This is
+		 * deliberately different from the stock firmware's FE path.
+		 * GE ports use PT_RX_CNTRL_CFG; P6 must use XGE_BYPASS_CFG, never
+		 * PORT_STRIDE * 6 (which aliases INTPT control/counters). */
 		for (port = 0; port < 5; port++)
 			if (priv->ports[port])
 				rtl_update(priv, 0xa5f8 + PORT_STRIDE * port,
-					   BIT(28) | GENMASK(21, 16) | BIT(31), BIT(28) | (16 << 16));
+					   BIT(28) | GENMASK(21, 16) | BIT(31),
+					   BIT(28) | (16U << 16));
+		if (priv->ports[6]) {
+			priv->p6_rx_bypass_saved = readl(priv->ni + NI_XGE_BYPASS_CFG);
+			/* PT1500-H10 COM4 A/B: 0x0008 -> CPU EPP empty/RX=0;
+			 * 0x1108 -> source6 EPP packets, DHCP and 0%-loss ping.
+			 * Keep the native shared CPU0 ring (logical destination16),
+			 * not the reference firmware's CPU1 topology or DMA addresses. */
+			rtl_update(priv, NI_XGE_BYPASS_CFG, NI_XGE_BYPASS_FIELDS,
+				   NI_XGE_BYPASS_CPU0);
+			priv->p6_rx_bypass_active = true;
+			dev_info(dev->dev.parent, "P6 native RX: CPU16 bypass=%08x\n",
+				 readl(priv->ni + NI_XGE_BYPASS_CFG));
+		}
 	}
 
 	rtl_update(priv, GLB_STATIC, PORT_TO_CPU, priv->dma_tx ? 0xf : priv->port);
@@ -1178,6 +1206,11 @@ static void rtl_engine_stop(struct rtl_xram *priv)
 	unsigned long flags;
 
 	hrtimer_cancel(&priv->timer);
+	if (priv->p6_rx_bypass_active) {
+		rtl_update(priv, NI_XGE_BYPASS_CFG, NI_XGE_BYPASS_FIELDS,
+			   priv->p6_rx_bypass_saved & NI_XGE_BYPASS_FIELDS);
+		priv->p6_rx_bypass_active = false;
+	}
 	if (priv->qm_rx) {
 		spin_lock_irqsave(&priv->rx_lock, flags);
 		priv->rx_active = false;
@@ -1229,10 +1262,13 @@ static int rtl_open(struct net_device *dev)
 
 	if (ret)
 		return ret;
-	/* P6 has no PT port block; its XGE MAC is programmed separately. */
+	/* The PT port block and its reset triplets exist only for ports 0..4.
+	 * P6 is an XGE port, not a GE port at PORT_STATIC + 6 * PORT_STRIDE.
+	 * registers.h identifies the apparent 0xa920..0xa934 range as the
+	 * internal-port RX counters/control block, not a P6 port register bank. */
 	if (lan->port < 5) {
-		/* Stock aal_set_active_port releases this port's interface and RX/TX resets. */
-		rtl_update(priv, 0xa008, BIT(lan->port) | BIT(lan->port + 6) | BIT(lan->port + 12), 0);
+		rtl_update(priv, 0xa008, BIT(lan->port) | BIT(lan->port + 6) |
+			   BIT(lan->port + 12), 0);
 		rtl_update(priv, PORT_STATIC + lan->port * PORT_STRIDE,
 			   GENMASK(31, 24), (u32)dev->dev_addr[5] << 24);
 		rtl_update(priv, PORT_RX + lan->port * PORT_STRIDE, BIT(0), BIT(0));
@@ -1773,111 +1809,15 @@ static ssize_t ports_state_show(struct device *dev, struct device_attribute *att
 static DEVICE_ATTR_RO(ports_state);
 
 /*
- * Live access to the P6 (QX) SerDes block while bringing the 2.5G lane up:
- *
- *   w <offset> <value>   write QX+offset (0..0xfff)
- *   r <offset>           read QX+offset
- *   t                    replay /etc/serdes/p6_serdes_sgmii_2g5.txt, then
- *                        report QX_SDS_STATE and the clock-ready bit
- *
- * The clock-ready bit (bit13 of QX_SDS_STATE) is what the stock
- * __p6_checkSdsClkReady() waits for; knowing which write makes it appear
- * avoids a rebuild per guess.
+ * The bring-up phase exposed two raw register windows here:
+ *   qx_reg  - read/write the P6 (QX) SerDes block
+ *   ni_reg  - read/write any NI-window offset below 0x10000
+ * Both are gone now. They were scaffolding for guessing register sequences,
+ * and they were actively dangerous: an unaligned or out-of-range offset can
+ * fault the bus (0xa958), and 0xa920..0xa934 are INTPT control/counters, not
+ * a P6 port bank. P6 bring-up is settled and lives in rtl_p6_bringup() and
+ * rtl_engine_start(). Read-only views remain in ports_state and xge_state.
  */
-static ssize_t qx_reg_show(struct device *dev, struct device_attribute *attr,
-			   char *buf)
-{
-	struct net_device *netdev = dev_get_drvdata(dev);
-	struct rtl_xram *priv = netdev_priv(netdev);
-	unsigned int i;
-	ssize_t len = 0;
-
-	if (!priv->p6_serdes)
-		return sysfs_emit(buf, "no p6-serdes resource\n");
-
-	len += sysfs_emit_at(buf, len, "state=%08x ready=%u last=%08x\n",
-			     readl(priv->p6_serdes + 0x58),
-			     !!(readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT),
-			     priv->qx_last);
-	for (i = 0; i < 0x10; i += 4)
-		len += sysfs_emit_at(buf, len, "%02x=%08x ", i,
-				     readl(priv->p6_serdes + i));
-	len += sysfs_emit_at(buf, len, "writes=%u\n", priv->p6_profile[0].count);
-
-	return len;
-}
-
-static ssize_t qx_reg_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
-{
-	struct net_device *netdev = dev_get_drvdata(dev);
-	struct rtl_xram *priv = netdev_priv(netdev);
-	unsigned long offset = 0, value = 0;
-	char op[8] = "";
-	int n;
-
-	if (!priv->p6_serdes)
-		return count;
-
-	n = sscanf(buf, "%7s %li %li", op, &offset, &value);
-	if (!strcmp(op, "w") && n >= 3 && offset < 0x1000) {
-		writel(value, priv->p6_serdes + offset);
-		priv->qx_last = readl(priv->p6_serdes + offset);
-	} else if (!strcmp(op, "r") && n >= 2 && offset < 0x1000) {
-		priv->qx_last = readl(priv->p6_serdes + offset);
-	} else if (!strcmp(op, "t")) {
-		unsigned int i;
-
-		if (!rtl_p6_read(priv, &priv->p6_profile[0]))
-			rtl_p6_apply(priv, &priv->p6_profile[0]);
-		for (i = 0; i < RTL_P6_CLOCK_TRIES; i++) {
-			if (rtl_p6_clock_ready(priv))
-				break;
-			mdelay(RTL_P6_CLOCK_STEP_MS);
-		}
-		priv->qx_last = readl(priv->p6_serdes + 0x58);
-		dev_info(dev, "qx replay: %u writes, state %08x, ready %u\n",
-			 priv->p6_profile[0].count, priv->qx_last,
-			 !!(priv->qx_last & RTL_P6_CLOCK_BIT));
-	}
-
-	return count;
-}
-static DEVICE_ATTR_RW(qx_reg);
-
-/* Raw NI window access for bring-up: r <off> / w <off> <val>. */
-static ssize_t ni_reg_show(struct device *dev, struct device_attribute *attr,
-			   char *buf)
-{
-	struct net_device *netdev = dev_get_drvdata(dev);
-	struct rtl_xram *priv = netdev_priv(netdev);
-
-	return sysfs_emit(buf, "last=%08x\n", priv->ni_last);
-}
-
-static ssize_t ni_reg_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
-{
-	struct net_device *netdev = dev_get_drvdata(dev);
-	struct rtl_xram *priv = netdev_priv(netdev);
-	unsigned long offset = 0, value = 0;
-	char op[8] = "";
-	int n;
-
-	n = sscanf(buf, "%7s %li %li", op, &offset, &value);
-	if (offset >= 0x10000)
-		return count;
-	if (!strcmp(op, "w") && n >= 3) {
-		writel(value, priv->ni + offset);
-		priv->ni_last = readl(priv->ni + offset);
-	} else if (!strcmp(op, "r") && n >= 2) {
-		priv->ni_last = readl(priv->ni + offset);
-	}
-	dev_info(dev, "ni %s %lx = %08x\n", op, offset, priv->ni_last);
-
-	return count;
-}
-static DEVICE_ATTR_RW(ni_reg);
 
 static ssize_t dma_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -1957,14 +1897,19 @@ static ssize_t xge_state_show(struct device *dev, struct device_attribute *attr,
 	lo = readl(priv->ni + 0xb278);
 	frames = ((u64)hi << 32) | lo;
 	return sysfs_emit(buf,
-			  "xge6_rx_good_frames=%llu misc=%08x com=%08x rxcfg=%08x\n"
+			  "xge6_rx_good_frames=%llu misc=%08x com=%08x rxcfg=%08x p6_bypass=%08x intpt0_rx=%08x\n"
 			  "xge_blk: b210=%08x b214=%08x b218=%08x b21c=%08x "
 			  "b220=%08x b224=%08x b228=%08x b22c=%08x "
 			  "b230=%08x b234=%08x b238=%08x b23c=%08x "
 			  "b240=%08x b244=%08x b248=%08x\n"
-			  "xge_rst: a008=%08x a01c=%08x l2_2300=%08x l2_p6_234c=%08x\n",
+			  "xge_rst: a008=%08x a01c=%08x l2_2300=%08x l2_p6_234c=%08x\n"
+			  "qmregs: 6108=%08x 610c=%08x 6110=%08x 2218=%08x\n"
+			  "xram: aa28=%08x aa44=%08x aa4c=%08x\n"
+			  "mux: a5f8=%08x a688=%08x a718=%08x a7a8=%08x a838=%08x\n"
+			  "rxmac: a5c8=%08x a658=%08x a6e8=%08x a778=%08x\n",
 			  frames, readl(priv->ni + 0xb2a8),
 			  readl(priv->ni + 0xb200), readl(priv->ni + 0xb204),
+			  readl(priv->ni + NI_XGE_BYPASS_CFG), readl(priv->ni + 0xa920),
 			  readl(priv->ni + 0xb210), readl(priv->ni + 0xb214),
 			  readl(priv->ni + 0xb218), readl(priv->ni + 0xb21c),
 			  readl(priv->ni + 0xb220), readl(priv->ni + 0xb224),
@@ -1974,7 +1919,16 @@ static ssize_t xge_state_show(struct device *dev, struct device_attribute *attr,
 			  readl(priv->ni + 0xb240), readl(priv->ni + 0xb244),
 			  readl(priv->ni + 0xb248),
 			  readl(priv->ni + 0xa008), readl(priv->ni + 0xa01c),
-			  readl(priv->ni + 0x2300), readl(priv->ni + 0x234c));
+			  readl(priv->ni + 0x2300), readl(priv->ni + 0x234c),
+			  readl(priv->ni + 0x6108), readl(priv->ni + 0x610c),
+			  readl(priv->ni + 0x6110), readl(priv->ni + 0x2218),
+			  readl(priv->ni + 0xaa28), readl(priv->ni + 0xaa44),
+			  readl(priv->ni + 0xaa4c),
+			  readl(priv->ni + 0xa5f8), readl(priv->ni + 0xa688),
+			  readl(priv->ni + 0xa718), readl(priv->ni + 0xa7a8),
+			  readl(priv->ni + 0xa838),
+			  readl(priv->ni + 0xa5c8), readl(priv->ni + 0xa658),
+			  readl(priv->ni + 0xa6e8), readl(priv->ni + 0xa778));
 }
 static DEVICE_ATTR_RO(xge_state);
 
@@ -2016,59 +1970,21 @@ static ssize_t qm_wait_show(struct device *dev, struct device_attribute *attr, c
 	return sysfs_emit(buf, "%u\n", value);
 }
 
-static ssize_t qm_wait_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
-{
-	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
-	unsigned int value;
-	int ret = kstrtouint(buf, 0, &value);
-
-	if (ret)
-		return ret;
-	if (value > 3)
-		return -EINVAL;
-	rtl_update(priv, 0x6108, GENMASK(27, 26), FIELD_PREP(GENMASK(27, 26), value));
-	return count;
-}
-static DEVICE_ATTR_RW(qm_wait);
+static DEVICE_ATTR_RO(qm_wait);
 
 static ssize_t qm_es_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
 	return sysfs_emit(buf, "%08x\n", readl(priv->ni + 0x6108));
 }
-
-static ssize_t qm_es_store(struct device *dev, struct device_attribute *attr,
-			  const char *buf, size_t count)
-{
-	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
-	u32 value;
-	int ret = kstrtou32(buf, 0, &value);
-	if (ret)
-		return ret;
-	writel(value, priv->ni + 0x6108);
-	return count;
-}
-static DEVICE_ATTR_RW(qm_es);
+static DEVICE_ATTR_RO(qm_es);
 
 static ssize_t qm_buffer_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
 	return sysfs_emit(buf, "%08x\n", readl(priv->ni + 0x68b0));
 }
-
-static ssize_t qm_buffer_store(struct device *dev, struct device_attribute *attr,
-			      const char *buf, size_t count)
-{
-	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
-	u32 value;
-	int ret = kstrtou32(buf, 0, &value);
-	if (ret)
-		return ret;
-	writel(value, priv->ni + 0x68b0);
-	return count;
-}
-static DEVICE_ATTR_RW(qm_buffer);
+static DEVICE_ATTR_RO(qm_buffer);
 
 /* Direct ingress to CPU0 isolates NI/QM from the classification pipeline. */
 static ssize_t rx_bypass_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -2078,27 +1994,11 @@ static ssize_t rx_bypass_show(struct device *dev, struct device_attribute *attr,
 	return sysfs_emit(buf, "%08x\n", readl(priv->ni + 0xa5f8 + PORT_STRIDE * priv->port));
 }
 
-static ssize_t rx_bypass_store(struct device *dev, struct device_attribute *attr,
-			      const char *buf, size_t count)
-{
-	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
-	bool enabled;
-	int ret = kstrtobool(buf, &enabled);
-
-	if (ret)
-		return ret;
-	rtl_update(priv, 0xa5f8 + PORT_STRIDE * priv->port,
-		   BIT(28) | GENMASK(21, 16) | BIT(31),
-		   enabled ? BIT(28) | (16 << 16) : 0);
-	return count;
-}
-static DEVICE_ATTR_RW(rx_bypass);
+static DEVICE_ATTR_RO(rx_bypass);
 
 static struct attribute *rtl_native_attrs[] = {
 	&dev_attr_xram_state.attr,
 	&dev_attr_ports_state.attr,
-	&dev_attr_qx_reg.attr,
-	&dev_attr_ni_reg.attr,
 	&dev_attr_dma_state.attr,
 	&dev_attr_datapath_profile.attr,
 	&dev_attr_pipeline_state.attr,
