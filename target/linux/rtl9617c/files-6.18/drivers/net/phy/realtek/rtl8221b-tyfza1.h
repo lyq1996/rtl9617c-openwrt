@@ -482,6 +482,38 @@ static int rtl8221b_tyfza1_config_init(struct phy_device *phydev)
 	if (ret < 0)
 		goto error;
 	/*
+	 * Match the stock firmware's SDS option mode.
+	 *
+	 * The PT1500's stock firmware leaves 0x697A at 0x0001, i.e. mode 1 =
+	 * "HiSGMII+SGMII", so the SERDES mode follows the copper link speed:
+	 * 2.5G uses HiSGMII and 1G/100M/10M fall back to SGMII on their own.
+	 * The power-on default is 3 ("HiSGMII only"), which pins the line side
+	 * to HiSGMII and leaves no negotiated fallback. Measured on the stock
+	 * firmware with the jack linked at 2500 and rx counters climbing:
+	 *
+	 *	MMD30.0x697A = 0x0001
+	 *	MMD30.0x7580 = 0x9412   (mode 0x12 HiSGMII)
+	 *	MMD30.0x758C = 0x0001   (SERDES signal detect)
+	 *	MMD30.0x758D = 0x801e   (link OK, all channels OK)
+	 *
+	 * Opt in with realtek,sds-option-mode so trees that want the power-on
+	 * value keep it.
+	 */
+	if (of_property_read_bool(phydev->mdio.dev.of_node,
+				  "realtek,oem-sds-option")) {
+		/* OEM Rtl8221_serdes_option_set_for_init() @ rtl8221b.ko+0x3de0
+		 * writes these five registers in this order. */
+		ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x75f3, BIT(0), 0);
+		if (ret < 0)
+			goto error;
+		ret = rtl8221b_update(phydev, MDIO_MMD_VEND1, 0x697a,
+				      GENMASK(5, 0), 1);
+		if (ret < 0)
+			goto error;
+		phydev_info(phydev, "SDS option mode set to 1 (HiSGMII+SGMII), 0x697A=0x%04x\n",
+			    phy_read_mmd(phydev, MDIO_MMD_VEND1, 0x697a));
+	}
+	/*
 	 * Loading the vendor patch is off by default.
 	 *
 	 * Measured on this board: with the patch loaded BMCR reads 0x9000 (reset

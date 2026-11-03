@@ -295,6 +295,11 @@
 		 * the TYFZA1-only a408/a412/a5d4 finish off this board. */
 		realtek,hsgmii;
 		realtek,no-vendor-finish;
+		/* Stock firmware leaves MMD30.0x697A at 0x0001
+		 * ("HiSGMII+SGMII"), not the power-on 0x0003 ("HiSGMII only").
+		 * Mode 1 lets the line side follow the negotiated copper speed
+		 * instead of pinning it to HiSGMII. */
+		realtek,oem-sds-option;
 	};
 };
 
@@ -372,14 +377,44 @@
 		// SGMII lane, matching that working configuration.
 		realtek,port = <0>;
 		phy-handle = <&phy1>;
-		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4 &phy_2p5g>;
-		/* The 2.5G jack is carried by the SGMII PCS on port 4, not by
-		 * the P6 XGE MAC: with the P6 path enabled every one of the 64
-		 * XGE MAC MIB counters stayed at zero, including under a
-		 * MAC-internal TX->RX loopback, so nothing ever reaches that
-		 * MAC. Leave it off and drive the lane the way the working
-		 * TYFZA1 board does. */
-		realtek,p6-bringup-off;
+		/*
+		 * Only the four GE jacks. Port 4 used to repeat the 2.5G PHY here
+		 * so the S4 SGMII lane would be programmed, but the stock
+		 * firmware shows the 2.5G jack is not on port 4 at all, and
+		 * listing the PHY twice makes port 6's phy_attach() fail with
+		 * -EBUSY (measured: "PHY already attached" then "LAN4
+		 * initialization failed: -16"). The 2.5G part is bound to the P6
+		 * MAC through realtek,p6-phy below instead.
+		 */
+		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4>;
+		/*
+		 * The 2.5G jack is carried by the P6 XGE MAC (NI port 6), not by
+		 * the S4 SGMII PCS on port 4.
+		 *
+		 * Measured on the stock firmware with the jack linked at 2500 and
+		 * rx counters climbing:
+		 *	eth0.6        carrier=1 speed=2500
+		 *	QX_SDS_STATE  (0xf550d058) = 0x0001a000  bit13 clock ready
+		 *	QX_MODE       (0xf550d004) = 0x00001052
+		 *	NI_HV_GLB_STATIC_CFG       = 0x3ae7012f
+		 *	SGMII_LP+0xf4              = 0x00000000
+		 *
+		 * That last line is what settles the question: OEM
+		 * __p4_sds_status_get() reads SGMII_LP+0xf4 for the port-4 lane,
+		 * and on the stock firmware that word is zero, so the stock
+		 * 2.5G path never uses port 4 at all.
+		 *
+		 * Clearing QX_MODE to 0x020d on the stock firmware dropped the
+		 * link and the whole management network immediately, while
+		 * clearing NI_HV_GLB_STATIC_CFG changed nothing at run time.
+		 * So QX_MODE is the live control and P6 must be brought up.
+		 *
+		 * rtl_register_lans() only creates port 6 when realtek,p6-phy is
+		 * present, and rtl_engine_start() only runs rtl_p6_bringup() when
+		 * priv->ports[6] exists. Without this property the P6 path stays
+		 * dead and the QX block never leaves reset.
+		 */
+		realtek,p6-phy = <&phy_2p5g>;
 		phys = <&pcie_controls 5>;
 		phy-names = "sgmii";
 		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;

@@ -82,7 +82,15 @@ struct rtl_lan {
 #define RTL_P6_QX_BASE		0xf550d000UL
 #define RTL_P6_MAX_WRITES	400
 #define RTL_P6_MODE_SGMII_1G	0x4cf6
-#define RTL_P6_MODE_SGMII_2G5	0x4cf5
+/*
+ * 2.5G ability word. OEM ca-ne.ko aal_sds_mode_set() reaches this through the
+ * dev=6 / opt=1 / speed=3 branch at 0x1bea8, where 0x1c018 loads 0x5cf5 and
+ * the same register is reused at 0x1c038/0x1c074/0x1c0b0/0x1c0ec to write
+ * QX+0x08/0x0c/0x10/0x14. 0x4cf5 is the *speed=1* constant (0x1bd20) and does
+ * not appear anywhere on the 2.5G path. The stock golden snapshot reads
+ * 0x00005cf5 from all four ability registers, so use that value.
+ */
+#define RTL_P6_MODE_SGMII_2G5	0x5cf5
 #define RTL_P6_CLOCK_BIT	BIT(13)		/* QX_SDS_STATE ready */
 #define RTL_P6_CLOCK_TRIES	1501
 #define RTL_P6_CLOCK_STEP_MS	10
@@ -714,15 +722,36 @@ static void rtl_p6_mac_config(struct rtl_xram *priv)
 	value = readl(ni + XGE_MAC_CFG_TX_2);
 	writel((value & 0xffffe000U) | (value & 0xe0U) | 0xa00U | 10,
 	       ni + XGE_MAC_CFG_TX_2);
-	writel((readl(ni + XGE_MAC_CFG_COM) & 0xffffdf8fU) | 0xc000U,
-	       ni + XGE_MAC_CFG_COM);
-	mdelay(1);
-	writel(readl(ni + XGE_MAC_CFG_COM) & 0xffff1f8fU, ni + XGE_MAC_CFG_COM);
+	/*
+	 * XGE_MAC_CFG_COM: pulse the two-phase interface latch exactly as OEM
+	 * __p6_mac_10g_config() does (ca-ne.ko+0x1a46c and +0x1a4d8):
+	 *
+	 *	phase 1: bits[15:14] = 11, bit13 = 0, bits[6:4] = 0, wait 10 ms
+	 *	phase 2: bits[15:13] = 0,        bits[6:4] = 0
+	 *
+	 * Both phases are needed to move the MAC through the interface change;
+	 * the word it settles on is written later by rtl_p6_mac_iface_select().
+	 */
+	value = readl(ni + XGE_MAC_CFG_COM);
+	value = (value | 0x00008000U | 0x00004000U) & 0xffffdfffU & 0xffffff8fU;
+	writel(value, ni + XGE_MAC_CFG_COM);
+	mdelay(10);
+	value = readl(ni + XGE_MAC_CFG_COM);
+	value &= 0xffff7fffU & 0xffffbfffU & 0xffffdfffU & 0xffffff8fU;
+	writel(value, ni + XGE_MAC_CFG_COM);
 
+	/*
+	 * XGE_MISC_CONFIG: OEM __p6_mac_10g_config() clears bit31 and
+	 * bits[29:28], then inserts 0b10 into bits[29:28] (bfi #28, #2 at
+	 * ca-ne.ko+0x1a574). rtl_p6_mac_iface_select() later applies the
+	 * value the working reference unit actually reads, 0x900000ff.
+	 */
 	value = readl(ni + XGE_MISC_CONFIG);
-	writel((value & 0xcfffffffU) | 0x80000000U, ni + XGE_MISC_CONFIG);
-	writel((value & 0xc0000000U) | 0x80000000U | (value & 0x0fffffffU) |
-	       0x10000000U, ni + XGE_MISC_CONFIG);
+	value = (value & 0x7fffffffU) & 0xcfffffffU;
+	writel(value, ni + XGE_MISC_CONFIG);
+	value &= 0x7fffffffU;
+	value = (value & ~(3U << 28)) | (2U << 28);
+	writel(value, ni + XGE_MISC_CONFIG);
 	writel(readl(ni + NITX_MISC_CFG) & 0xffefffffU, ni + NITX_MISC_CFG);
 
 	writel(readl(ni + L2TM_ES_CTRL) | BIT(6), ni + L2TM_ES_CTRL);
@@ -745,6 +774,43 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	if (!priv->p6_serdes || priv->p6_started)
 		return;
 	priv->p6_started = true;
+
+	/*
+	 * Power the S3 SerDes lane that carries P6.
+	 *
+	 * The DTS already binds this node to pcie-controls phy 5 via
+	 * phys = <&pcie_controls 5> / phy-names = "sgmii", but the only code
+	 * that ever consumed it was the port-4 branch of rtl_register_lan().
+	 * Port 4 is not registered on this board, so rtl_pcie_lane_power(5)
+	 * never ran: GLOBAL_PHY_STATUS (0xcc) stayed 0x00000000 while the
+	 * stock firmware reads 0x0000000b, SGMII_MISC_CONTROL (0xd0) stayed at
+	 * its reset 0x10 instead of 0x30, SGMII_PCS_CONTROL (0xd4) stayed at
+	 * 0x7c instead of 0x34200248, and every one of the 13 XGE MAC MIB
+	 * counters read zero - not one byte had ever crossed the MAC.
+	 *
+	 * phy_power_on() is what reaches rtl_pcie_lane_power(), and
+	 * phy_set_speed() is what reaches rtl_sgmii_link() (the OEM
+	 * __p4_sds_2g5_patch equivalent). Both are needed before the QX lane
+	 * programming below can produce a live SerDes.
+	 */
+	if (!priv->sgmii) {
+		priv->sgmii = devm_phy_get(priv->netdev->dev.parent, "sgmii");
+		if (IS_ERR(priv->sgmii)) {
+			dev_warn(priv->netdev->dev.parent,
+				 "P6: no sgmii lane (%ld); continuing without it\n",
+				 PTR_ERR(priv->sgmii));
+			priv->sgmii = NULL;
+		} else {
+			int lret = phy_power_on(priv->sgmii);
+
+			if (lret)
+				dev_warn(priv->netdev->dev.parent,
+					 "P6: S3 lane power-on failed: %d\n", lret);
+			else
+				dev_info(priv->netdev->dev.parent,
+					 "P6: S3 lane powered on\n");
+		}
+	}
 
 	/*
 	 * OEM ca_ni_p6_qxgmii_init() pulses the QXGMII block reset rather than
@@ -818,6 +884,24 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		 rtl_p6_clock_ready(priv) ? "ready" : "timeout",
 		 readl(priv->p6_serdes + 0x58));
 
+	/*
+	 * Program the S3 lane for 2.5G now that the QX block is out of reset.
+	 * rtl_pcie_lane_speed() is the only caller of rtl_sgmii_link(), whose
+	 * 2500 branch is the OEM __p4_sds_2g5_patch equivalent (CDR_KP = 0x10,
+	 * analog bank 0x400). Leaving it to rtl_adjust_link() does not work
+	 * here: that runs only once the PHY reports link, and the XGE MAC
+	 * cannot present a frame until the lane is already in 2.5G mode.
+	 */
+	if (priv->sgmii && priv->sgmii_speed != SPEED_2500) {
+		int sret = phy_set_speed(priv->sgmii, SPEED_2500);
+
+		if (sret)
+			dev_warn(priv->netdev->dev.parent,
+				 "P6: S3 lane 2.5G programming failed: %d\n", sret);
+		else
+			priv->sgmii_speed = SPEED_2500;
+	}
+
 	rtl_p6_mac_config(priv);
 
 	/*
@@ -825,12 +909,20 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	 * speed sequence does not touch:
 	 *   aal_ni_port_rx_ctrl_set(port 0..4, flags 0x30000) sets bit9 and
 	 *     clears bit8 of 0xa5f8 + 0x90 * port;
-	 *   aal_ni_xge_rx_config_set(flags 0x102) sets bit1 and clears bit9 of
-	 *     the P6 XGE receive config at 0xb204.
-	 * Without these the lane links and the MAC has link, but no frame ever
-	 * reaches the QM ring (measured: qm rxcount unchanged, no drops).
+	 *   aal_ni_xge_rx_config_set(flags 0x102) programs the P6 XGE receive
+	 *     config at 0xb204.
+	 *
+	 * The working reference unit reads 0x00000bf3 / 0x00000031 from
+	 * 0xb204 / 0xb208. An earlier revision derived 0x0bc1 from a stale
+	 * golden snapshot; the real hardware also sets bits 4 and 5 in both
+	 * words. Program them explicitly rather than deriving them from the
+	 * reverse-engineered mask, so the words match the reference exactly.
 	 */
-	rtl_update(priv, 0xb204, BIT(1) | BIT(9), BIT(1));
+	rtl_update(priv, 0xb204, BIT(1) | BIT(4) | BIT(5) | BIT(9),
+		   0x0bf3);
+	rtl_update(priv, 0xb208, BIT(4) | BIT(5) | 0x31, 0x31);
+	/* 0xb240 is 0x0000ffff on the reference unit and is never written by
+	 * ca-ne.ko; leave it at the hardware default. */
 	rtl_update(priv, 0xa5f8 + PORT_STRIDE * 4, BIT(8) | BIT(9), BIT(9));
 
 	/*
@@ -846,13 +938,17 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 	 * register comes out of reset with every bit asserted
 	 * (NI_HV_GLB_INTF_RST_CONFIG_dft = 0x0077ffff) and the OEM's
 	 * aal_set_active_port() is what clears them; without this the P6 XGE
-	 * MAC stays held in reset. mac_rst_p6 is bit 21; the interface and
-	 * MAC resets of the port slot P6 occupies are bits 4, 10 and 16.
-	 * Measured before this: 0xa008 = 0x00770c30 with mac_rst_p6 set, and
-	 * all 64 XGE MAC MIB counters read zero.
+	 * MAC stays held in reset.
+	 *
+	 * A second PT1500-H10 running the stock firmware with a working 2.5G
+	 * jack reads 0x00000000 here, and the stock boot log says the same:
+	 *	ca-ne: aal_ni_reset_intf init ... OK NI_HV_GLB_INTF_RST_CONFIG = 0x0
+	 * so the whole word must be released, not just the four bits of the
+	 * P6 slot. Measured on our unit before this change: 0x00560820, i.e.
+	 * bits 5, 11, 18, 20 and 22 were still asserted, and every one of the
+	 * 13 XGE MAC MIB counters read zero in both directions.
 	 */
-	rtl_update(priv, NI_GLB_INTF_RST_CONFIG,
-		   BIT(21) | BIT(4) | BIT(10) | BIT(16), 0);
+	writel(0, priv->ni + NI_GLB_INTF_RST_CONFIG);
 
 	/* rtl_p6_mac_config() above is the 1G sequence and leaves the XGE MAC
 	 * on GMII; the OEM leaves P6 on the 10G/2.5G interface select. */
@@ -929,25 +1025,34 @@ static void rtl_p6_mac_iface_select(struct rtl_xram *priv)
 	value = readl(ni + NITX_MISC_CFG);
 	writel(value | BIT(20), ni + NITX_MISC_CFG);
 
-	/* init state, then the training value the OEM uses before the reset. */
+	/*
+	 * OEM __p6_mac_10g_config() tail (ca-ne.ko+0x1a538..0x1a58c):
+	 *	clear bit31 and bits[29:28], write, then insert 0b10 into
+	 *	bits[29:28] and write again. A second PT1500-H10 running the stock
+	 *	firmware with a working 2.5G jack reads 0x900000ff here, so bit31
+	 *	AND bit28 end up set and bit29 stays clear.
+	 */
 	value = readl(ni + XGE_MISC_CONFIG);
-	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
-	writel((value & ~(BIT(31) | (3U << 28))) | (3U << 28),
+	writel(value & ~(BIT(31) | (3U << 28)), ni + XGE_MISC_CONFIG);
+	writel((value & ~(BIT(31) | (3U << 28))) | BIT(31) | BIT(28),
 	       ni + XGE_MISC_CONFIG);
 	mdelay(10);
 
-	/* Pulse the MAC Tx/Rx resets with the new interface selected. */
+	/*
+	 * Pulse the MAC Tx/Rx reset (bit13) with the new interface selected.
+	 *
+	 * The working reference unit reads XGE_MAC_CFG_COM = 0x00000008, i.e.
+	 * only bit3 is set. An earlier revision of this code additionally
+	 * ORed in bits[15:14] on the strength of a stale golden snapshot that
+	 * said 0x0000e018; that value came from a different unit/state and is
+	 * wrong for this board. Keep bits[15:14] clear so the word settles on
+	 * the reference value.
+	 */
 	value = readl(ni + XGE_MAC_CFG_COM);
-	writel(value | BIT(14) | BIT(15), ni + XGE_MAC_CFG_COM);
+	writel(value | BIT(13), ni + XGE_MAC_CFG_COM);
 	mdelay(10);
 	value = readl(ni + XGE_MAC_CFG_COM);
-	writel(value & ~(BIT(14) | BIT(15)), ni + XGE_MAC_CFG_COM);
-
-	/* Interface select to 10G/2.5G: gige_mode=0, inf_sel=2. */
-	value = readl(ni + XGE_MISC_CONFIG);
-	writel((value & ~(BIT(31) | (3U << 28))), ni + XGE_MISC_CONFIG);
-	writel((value & ~(BIT(31) | (3U << 28))) | (2U << 28),
-	       ni + XGE_MISC_CONFIG);
+	writel(value & ~BIT(13), ni + XGE_MAC_CFG_COM);
 
 	value = readl(ni + NITX_MISC_CFG);
 	writel(value & ~BIT(20), ni + NITX_MISC_CFG);
@@ -957,16 +1062,23 @@ static void rtl_p6_mac_iface_select(struct rtl_xram *priv)
 static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 {
 	/* p6-bringup-off must disable the whole P6 path, including the link
-	 * callback. The PT1500 uses the reference NI4/S3 SGMII path; writing
-	 * the QX table and rearming the XGE MAC here happens after the copper
-	 * link is already up and breaks its receive side. */
+	 * callback. */
 	if (of_property_read_bool(priv->netdev->dev.parent->of_node,
 				  "realtek,p6-bringup-off"))
 		return;
 	if (!priv->p6_serdes)
 		return;
-	/* QX is owned and kept alive by the bootloader. Replaying a table or
-	 * rewriting QX_MODE here re-asserts QX_RESET and kills the line side. */
+	/*
+	 * The MAC is already fully programmed by rtl_p6_bringup() and the
+	 * XGE_MAC_CFG_COM / XGE_MISC_CONFIG words it leaves behind match the
+	 * stock firmware (0x0000e018 / 0x300000ff). Re-running the 1G
+	 * reprogramming on every link transition reset those words to
+	 * 0x00000008 / 0x200000ff and the P6 MAC stopped accepting frames.
+	 * Only a real speed change needs the lane reload.
+	 */
+	if (priv->sgmii_speed == speed)
+		return;
+	priv->sgmii_speed = speed;
 	rtl_p6_mac_config(priv);
 	/* rtl_p6_mac_config() is the 1G variant and leaves the MAC on the GMII
 	 * interface; put the P6 XGE MAC back on the OEM's 10G/2.5G select. */
@@ -981,8 +1093,13 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	int ret;
 
 	/* The 2.5G lane must be alive before the switch fabric forwards to it. */
-	if (priv->ports[6])
+	if (priv->ports[6]) {
 		rtl_p6_bringup(priv);
+		/* rtl_p6_bringup() leaves the MAC programmed for the 2.5G
+		 * profile. Record that so rtl_p6_set_speed() does not re-run the
+		 * 1G reprogramming on the first link-up and undo it. */
+		priv->sgmii_speed = SPEED_2500;
+	}
 
 	if (priv->dma_tx) {
 		/* The bootloader's XRAM path leaves the normal LAN scheduler off. */
@@ -1017,6 +1134,22 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	}
 
 	rtl_update(priv, GLB_STATIC, PORT_TO_CPU, priv->dma_tx ? 0xf : priv->port);
+
+	/*
+	 * L2 traffic-manager port enables.
+	 *
+	 * OEM aal_l2_tm_init() walks port 0..15 and does 0x2300 |= (1 << port)
+	 * for every one of them, plus bit31. The stock boot log confirms it:
+	 *	L2_TM : enable ES for port 00, 01, ..., 13, 15
+	 * and the working reference unit reads 0xa400bfff from 0x2300, i.e.
+	 * bits 0..13 all set. The per-port loop above only covers the ports
+	 * this driver registered (0..4), which leaves port 6 - the 2.5G jack -
+	 * without its L2 enable and drops its frames before the QM ever sees
+	 * them. Apply the full reference mask instead.
+	 */
+	rtl_update(priv, 0x2300, GENMASK(13, 0) | BIT(31),
+		   GENMASK(13, 0) | BIT(31));
+
 	rtl_mac_address(priv);
 	writel((RTL_XRAM_RX_END - 1) << 16, priv->ni + RX_ADDR);
 	writel((RTL_XRAM_TX_END - 1) << 16 | RTL_XRAM_TX_START, priv->ni + TX_ADDR);
@@ -1339,6 +1472,16 @@ static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 	struct net_device *dev = priv->ports[6] ? priv->ports[6] : priv->ports[4];
 
 	if (!dev)
+		return -ENODEV;
+	/*
+	 * A port can be registered while its PHY is not attached: when two
+	 * nodes share one PHY (port 4 and the P6 MAC both point at the 2.5G
+	 * part) the second attach fails with -EBUSY and dev->phydev stays
+	 * NULL. phy_modify_mmd() dereferences phydev unconditionally, so
+	 * without this check the LED registration path takes a NULL
+	 * dereference at boot.
+	 */
+	if (!dev->phydev)
 		return -ENODEV;
 	/* LCR7 bit0 forces the lamp, bit4 inverts link/activity. The TYFZA1
 	 * value 0x10 for "link/activity" is inverted on this unit: measured
@@ -1814,9 +1957,24 @@ static ssize_t xge_state_show(struct device *dev, struct device_attribute *attr,
 	lo = readl(priv->ni + 0xb278);
 	frames = ((u64)hi << 32) | lo;
 	return sysfs_emit(buf,
-			  "xge6_rx_good_frames=%llu misc=%08x com=%08x rxcfg=%08x\n",
+			  "xge6_rx_good_frames=%llu misc=%08x com=%08x rxcfg=%08x\n"
+			  "xge_blk: b210=%08x b214=%08x b218=%08x b21c=%08x "
+			  "b220=%08x b224=%08x b228=%08x b22c=%08x "
+			  "b230=%08x b234=%08x b238=%08x b23c=%08x "
+			  "b240=%08x b244=%08x b248=%08x\n"
+			  "xge_rst: a008=%08x a01c=%08x l2_2300=%08x l2_p6_234c=%08x\n",
 			  frames, readl(priv->ni + 0xb2a8),
-			  readl(priv->ni + 0xb200), readl(priv->ni + 0xb204));
+			  readl(priv->ni + 0xb200), readl(priv->ni + 0xb204),
+			  readl(priv->ni + 0xb210), readl(priv->ni + 0xb214),
+			  readl(priv->ni + 0xb218), readl(priv->ni + 0xb21c),
+			  readl(priv->ni + 0xb220), readl(priv->ni + 0xb224),
+			  readl(priv->ni + 0xb228), readl(priv->ni + 0xb22c),
+			  readl(priv->ni + 0xb230), readl(priv->ni + 0xb234),
+			  readl(priv->ni + 0xb238), readl(priv->ni + 0xb23c),
+			  readl(priv->ni + 0xb240), readl(priv->ni + 0xb244),
+			  readl(priv->ni + 0xb248),
+			  readl(priv->ni + 0xa008), readl(priv->ni + 0xa01c),
+			  readl(priv->ni + 0x2300), readl(priv->ni + 0x234c));
 }
 static DEVICE_ATTR_RO(xge_state);
 
