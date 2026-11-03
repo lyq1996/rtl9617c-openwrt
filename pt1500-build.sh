@@ -52,6 +52,16 @@ echo CONFIGURED
 # and each one costs initramfs space.
 rm -f "$DST/build_dir/target-aarch64_cortex-a55_musl/root-rtl9617c/usr/share/pt1500/rootfs_data.ubifs"
 
+# The feeds were seeded through a 9p/Windows path, which leaves every file
+# 0777. rpcd refuses to load a world-writable handler script, so
+# /usr/share/rpcd/ucode/luci was skipped and LuCI failed with
+# "RPC call to luci/getFeatures failed ... Object not found".
+# The package build copies these modes verbatim, so normalize the feed before
+# building; acl.d entries are data and must not be host-executable either.
+chmod -R go-w "$DST/feeds/luci" "$DST/feeds/packages" 2>/dev/null || true
+find "$DST/feeds/luci" -path '*/root/usr/share/rpcd/ucode/*' -type f -exec chmod 0755 {} + 2>/dev/null || true
+find "$DST/feeds/luci" -path '*/root/usr/share/rpcd/acl.d/*.json' -type f -exec chmod 0644 {} + 2>/dev/null || true
+
 # base-files and the board package are file-only, but their stamps do not
 # watch target/linux/<board>/base-files, so force them.
 make package/base-files/clean package/pt1500-storage/clean >/dev/null 2>&1 || true
