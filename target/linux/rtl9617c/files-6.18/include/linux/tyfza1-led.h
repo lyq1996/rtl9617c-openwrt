@@ -10,6 +10,12 @@ struct tyfza1_led {
 	struct list_head node;
 	int (*output)(struct tyfza1_led *led, unsigned int value);
 	unsigned int requested;
+	/* Back-pointer for the output callback. A board can expose several
+	 * channels of one controller, so the callback cannot use
+	 * container_of() on a single embedded member; it reads drvdata and
+	 * channel instead. */
+	void *drvdata;
+	unsigned int channel;
 };
 
 int tyfza1_led_register(struct device *dev, struct tyfza1_led *led,

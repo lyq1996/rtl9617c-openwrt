@@ -6,10 +6,22 @@ board_config_update
 
 case "$(board_name)" in
 youhua,pt1500-h10-2p5g)
-	# This board's verified 2.5G jack is NI P6 -> lan7, not the port-4
-	# SGMII netdev lan5. Keep the GE netdev names and include P6 even if
-	# network defaults run before its PHY registration finishes.
-	ucidef_set_interface_lan "lan1 lan2 lan3 lan4 lan7"
+	# Verified by plugging the 2.5G jack and the adjacent GE jack into two
+	# PC NICs at once: NI port 0 never gets a carrier (its PHY is not routed
+	# to a connector on this PCB), NI port 1 is the GE jack next to the 2.5G
+	# one, NI ports 2 and 3 are the remaining GE jacks, and NI port 6 is the
+	# 2.5G jack. The driver names them by silkscreen position, so the wired
+	# jacks are lan1 (2.5G) and lan2..lan4 (GE).
+	#
+	# lan0 is NI port 0: it exists as a netdev but has no connector, so it
+	# is deliberately left out of the bridge. That leaves the panel with
+	# exactly the four RJ45 jacks the case has.
+	lan_ports=
+	for port in lan1 lan2 lan3 lan4; do
+		[ -e "/sys/class/net/$port" ] && lan_ports="$lan_ports $port"
+	done
+	[ -n "$lan_ports" ] || lan_ports="lan1 lan2 lan3 lan4"
+	ucidef_set_interface_lan "$lan_ports"
 	;;
 youhua,pt1500-h10)
 	# No switch: every jack is its own NI MAC port with its own PHY, and

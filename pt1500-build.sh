@@ -25,7 +25,8 @@ echo SYNCED
 cd "$DST"
 for sym in \
 	luci luci-ssl luci-proto-ppp luci-app-firewall \
-	uhttpd uhttpd-mod-ubus firewall4 dnsmasq pt1500-storage
+	uhttpd uhttpd-mod-ubus firewall4 dnsmasq pt1500-storage \
+	tyfza1-pon-control
 do
 	if grep -q "^# CONFIG_PACKAGE_$sym is not set" .config; then
 		sed -i "s|^# CONFIG_PACKAGE_$sym is not set|CONFIG_PACKAGE_$sym=y|" .config
@@ -33,6 +34,11 @@ do
 		echo "CONFIG_PACKAGE_$sym=y" >> .config
 	fi
 done
+# tyfza1-pon-control also has to stay enabled through defconfig: its absence
+# silently costs /usr/share/tyfza1/leds.uc, which /etc/init.d/tyfza1-leds
+# execs. Without that script nothing ever drives LED_PON / LED_LOS and both
+# panel lamps stay dark, which looks like a PON fault but is only a missing
+# package. Keep the symbol asserted after every defconfig run.
 # Upstream renamed the board to youhua_pt1500_h10_2p5g and now ships a FIT
 # with a squashfs root (sysupgrade.itb) plus a recovery initramfs; make the
 # build tree select that device instead of the removed youhua_pt1500_h10.
@@ -47,6 +53,29 @@ sed -i 's|^CONFIG_PACKAGE_uboot-envtools=y|# CONFIG_PACKAGE_uboot-envtools is no
 
 make defconfig >/tmp/pt1500-defconfig.log 2>&1 || { tail -20 /tmp/pt1500-defconfig.log; exit 1; }
 echo CONFIGURED
+
+# defconfig rewrites .config and can silently drop a symbol the selected
+# profile does not name. tyfza1-pon-control failed exactly that way: its
+# absence costs /usr/share/tyfza1/leds.uc, which /etc/init.d/tyfza1-leds
+# execs, so LED_PON and LED_LOS were never driven and both panel lamps stayed
+# dark. Assert the symbols after defconfig and re-run it once; the second run
+# is stable because the symbols are now explicitly set in .config.
+for sym in tyfza1-pon-control luci-ssl uhttpd; do
+	if ! grep -q "^CONFIG_PACKAGE_$sym=y$" .config; then
+		echo "pt1500-build: enabling CONFIG_PACKAGE_$sym" >&2
+		sed -i "/^# CONFIG_PACKAGE_$sym is not set$/d" .config
+		sed -i "/^CONFIG_PACKAGE_$sym=/d" .config
+		echo "CONFIG_PACKAGE_$sym=y" >> .config
+	fi
+done
+make defconfig >/tmp/pt1500-defconfig.log 2>&1 || { tail -20 /tmp/pt1500-defconfig.log; exit 1; }
+for sym in tyfza1-pon-control luci-ssl uhttpd; do
+	grep -q "^CONFIG_PACKAGE_$sym=y$" .config || {
+		echo "pt1500-build: CONFIG_PACKAGE_$sym is still not set after defconfig" >&2
+		exit 1
+	}
+done
+echo "PACKAGES ASSERTED"
 
 # Stale rootfs leftovers from earlier experiments: nothing installs them now,
 # and each one costs initramfs space.

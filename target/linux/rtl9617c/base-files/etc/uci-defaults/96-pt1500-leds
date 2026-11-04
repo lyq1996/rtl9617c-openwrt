@@ -1,12 +1,26 @@
 #!/bin/sh
 # The LED section of /etc/config/system is generated once and then lives in the
 # overlay, so a corrected mapping in board.d/01_leds never reaches a unit that
-# already booted. Point the four panel lamps at the jack each one belongs to:
-# LED_EPHY0 lights the 2.5G jack (lan5), EPHY1..3 the GE jacks (lan2..lan4).
+# already booted. Point the four panel lamps at the jack each one belongs to.
+#
+# Netdev names follow the front-panel silkscreen after the port renaming:
+#   lan1 = 2.5G jack (NI port 6), lan2..lan4 = the three wired GE jacks
+#   (NI ports 1..3). NI port 0 has no connector and is named lan0.
+#
+# The stock unit maps one LED_EPHY* per wired jack and drives them all through
+# the netdev trigger. The 2.5G lamp is NOT among them: on the reference unit
+# LED_8221B_P6_0/1/2 are owned by the leds-rtl8221b PHY engine and carry
+# trigger=none, so the PHY decides link/activity in hardware.
+#
+# Earlier revisions pointed LED_EPHY0 at lan5, which this board never
+# registers, so that lamp could never light. LED_EPHY0 is the fourth GE
+# channel; with only three wired GE jacks it is left unbound.
 grep -qa youhua,pt1500-h10 /proc/device-tree/compatible 2>/dev/null || exit 0
 uci -q get system.led_lan0 >/dev/null || exit 0
 
-uci set system.led_lan0.dev='lan5'
+# LED_EPHY0 has no wired jack on this board: park it on the phantom lan0 so it
+# stays dark instead of mimicking a link that does not exist.
+uci set system.led_lan0.dev='lan0'
 uci set system.led_lan1.dev='lan2'
 uci set system.led_lan2.dev='lan3'
 uci set system.led_lan3.dev='lan4'

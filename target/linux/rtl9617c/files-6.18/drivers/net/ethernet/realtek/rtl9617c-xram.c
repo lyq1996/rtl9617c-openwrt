@@ -49,6 +49,11 @@
 #define PORT_RX 0xa5c8
 #define PORT_TX 0xa5d4
 #define PORT_STRIDE 0x90
+/* The RTL8221B drives three LED channels. The reference unit publishes them as
+ * LED_8221B_P6_0/1/2 via a platform driver named leds-rtl8221b, each with
+ * max_brightness=255, trigger=none and no device_name, so the PHY owns
+ * link/activity and Linux only exposes the control surface. */
+#define RTL_PHY_LED_COUNT	3
 #define RX_ADDR 0xaa20
 #define TX_ADDR 0xaa24
 #define XRAM_CFG 0xaa28
@@ -138,7 +143,7 @@ struct rtl_xram {
 	bool p6_rx_bypass_active;
 	struct phy *sgmii;
 	unsigned int sgmii_speed;
-	struct tyfza1_led phy_led;
+	struct tyfza1_led phy_led[RTL_PHY_LED_COUNT];
 	bool phy_led_registered;
 	bool native_groups_created;
 	bool wifi_started;
@@ -1502,15 +1507,30 @@ static const struct ethtool_ops rtl_ethtool_ops = {
 	.nway_reset = phy_ethtool_nway_reset,
 };
 
+/*
+ * RTL8221B LED channel control.
+ *
+ * The reference unit exposes three channels as LED_8221B_P6_0/1/2 with
+ * max_brightness=255, trigger=none and no device_name. That shape says the
+ * PHY keeps ownership of link/activity and Linux only offers the control
+ * surface; the lamps still blink on traffic because the PHY decides it.
+ *
+ * This driver must not force a state at boot. Writing LCR7 (0xd044) bit0
+ * forces the lamp on and bit4 inverts link/activity, and an earlier revision
+ * left value 2 mapped to a forced-off write, which is why the 2.5G lamp on
+ * this board ignored the cable entirely. Value 0 hands the channel back to
+ * the PHY, which is also the state the reference unit sits in.
+ */
 static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 {
-	struct rtl_xram *priv = container_of(led, struct rtl_xram, phy_led);
+	struct rtl_xram *priv = led->drvdata;
 	struct net_device *dev = priv->ports[6] ? priv->ports[6] : priv->ports[4];
+	unsigned int channel = led->channel;
+	unsigned int reg;
 
 	if (!dev)
 		return -ENODEV;
-	/*
-	 * A port can be registered while its PHY is not attached: when two
+	/* A port can be registered while its PHY is not attached: when two
 	 * nodes share one PHY (port 4 and the P6 MAC both point at the 2.5G
 	 * part) the second attach fails with -EBUSY and dev->phydev stays
 	 * NULL. phy_modify_mmd() dereferences phydev unconditionally, so
@@ -1519,13 +1539,15 @@ static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 	 */
 	if (!dev->phydev)
 		return -ENODEV;
-	/* LCR7 bit0 forces the lamp, bit4 inverts link/activity. The TYFZA1
-	 * value 0x10 for "link/activity" is inverted on this unit: measured
-	 * with the cable out the lamp was lit, with it in it went dark, and
-	 * traffic made it blink. Leaving both bits clear lets the PHY drive
-	 * its own link/activity with normal polarity. */
-	return phy_modify_mmd(dev->phydev, MDIO_MMD_VEND2,
-			      0xd044, 0x11, value == 2 ? 0x00 : value);
+	if (channel >= RTL_PHY_LED_COUNT)
+		return -EINVAL;
+	/* One LCR per channel; 0xd044 is channel 0. */
+	reg = 0xd044 + channel * 2;
+	/* 0 = PHY owns link/activity (the reference state). 1 = force on,
+	 * which is the only forced state worth exposing; values above 1 are
+	 * accepted by the class but carry no extra meaning here. */
+	return phy_modify_mmd(dev->phydev, MDIO_MMD_VEND2, reg, 0x11,
+			       value == 0 ? 0x00 : 0x01);
 }
 
 static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)
@@ -1536,7 +1558,10 @@ static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)
 	if (!dev)
 		return;
 	if ((port == 4 || port == 6) && priv->phy_led_registered) {
-		tyfza1_led_unregister(&priv->phy_led);
+		unsigned int ch;
+
+		for (ch = 0; ch < RTL_PHY_LED_COUNT; ch++)
+			tyfza1_led_unregister(&priv->phy_led[ch]);
 		priv->phy_led_registered = false;
 	}
 	spin_lock_irqsave(&priv->tx_lock, flags);
@@ -1617,11 +1642,48 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	}
 	priv->ports[port] = dev;
 	SET_NETDEV_DEV(dev, parent);
-	/* Keep the r36 naming: PT GE ports are lan1.., P6 is an extra
-	 * interface. Do not renumber GE while bringing up the 2.5G LED. */
-	index = port == 4 ? 4 : port + 1;
-	if (port == 4 && priv->ports[3])
-		index = 5;
+	/*
+	 * Netdev names follow the front-panel silkscreen, not the NI port
+	 * index. Measured on this board by plugging the 2.5G jack and the
+	 * adjacent GE jack into two PC NICs at once:
+	 *
+	 *	NI port 0 -> no carrier ever     PCB does not route this PHY
+	 *	NI port 1 -> 1000M with a cable  real jack
+	 *	NI port 2 -> real jack
+	 *	NI port 3 -> real jack
+	 *	NI port 6 -> 2500M with a cable  real jack (the 2.5G one)
+	 *
+	 * The silkscreen calls the 2.5G jack LAN1, so port 6 takes lan1 and the
+	 * three wired GE jacks take lan2..lan4. NI port 0 has no connector, so
+	 * it is named lan0 and deliberately kept out of br-lan: the panel then
+	 * shows exactly the four jacks the case actually has.
+	 *
+	 * The old scheme was `lan%u` with port + 1, which made the 2.5G jack
+	 * lan7 and put the phantom port 0 on lan1.
+	 */
+	switch (port) {
+	case 0:
+		index = 0;	/* no connector on this board */
+		break;
+	case 1:
+		index = 2;
+		break;
+	case 2:
+		index = 3;
+		break;
+	case 3:
+		index = 4;
+		break;
+	case 6:
+		index = 1;	/* 2.5G jack, silkscreen LAN1 */
+		break;
+	case 4:
+		index = 5;	/* S4 SGMII lane, unused on this board */
+		break;
+	default:
+		index = port + 1;
+		break;
+	}
 	snprintf(dev->name, sizeof(dev->name), "lan%u", index);
 	lan = netdev_priv(dev);
 	lan->shared = priv;
@@ -1660,16 +1722,35 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 		goto put_phy;
 	WRITE_ONCE(priv->registered_ports, priv->registered_ports | BIT(port));
 	if (port == 6 || (port == 4 && !priv->ports[6])) {
-		priv->phy_led.output = rtl_phy_led_output;
-		priv->phy_led.requested = 2;
-		priv->phy_led.cdev.name = port == 6 ? "LED_8221B_P6_0" :
-					       "LED_8221B_P4_0";
-		priv->phy_led.cdev.max_brightness = 2;
-		ret = tyfza1_led_register(parent, &priv->phy_led, NULL);
-		if (ret)
-			dev_warn(parent, "LAN4 2.5G LED initialization failed: %d\n", ret);
-		else
-			priv->phy_led_registered = true;
+		const char *prefix = port == 6 ? "LED_8221B_P6_" : "LED_8221B_P4_";
+		unsigned int ch;
+		bool any_ok = false;
+
+		/* Three channels, matching the reference unit's leds-rtl8221b
+		 * surface: max_brightness=255 and trigger left at none so the
+		 * PHY keeps deciding link/activity. */
+		for (ch = 0; ch < RTL_PHY_LED_COUNT; ch++) {
+			struct tyfza1_led *led = &priv->phy_led[ch];
+
+			memset(led, 0, sizeof(*led));
+			led->output = rtl_phy_led_output;
+			led->drvdata = priv;
+			led->channel = ch;
+			led->requested = 0;
+			led->cdev.name = devm_kasprintf(parent, GFP_KERNEL,
+							"%s%u", prefix, ch);
+			if (!led->cdev.name)
+				continue;
+			led->cdev.max_brightness = 255;
+			ret = tyfza1_led_register(parent, led, NULL);
+			if (ret) {
+				dev_warn(parent, "%s%u LED registration failed: %d\n",
+					 prefix, ch, ret);
+				continue;
+			}
+			any_ok = true;
+		}
+		priv->phy_led_registered = any_ok;
 	}
 	dev_info(parent, "%s: LAN port %u %s, PHY %08x, MAC %pM\n",
 		 dev->name, port, priv->qm_rx ? "native NI/DMA" : "management XRAM",
