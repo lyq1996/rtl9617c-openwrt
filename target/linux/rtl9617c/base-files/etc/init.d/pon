@@ -44,6 +44,7 @@ configure_link() {
 	[ "$enabled" = 1 ] || return 0
 	pon_stage=mode
 	config_get mode pon mode
+	[ -n "$mode" ] || mode=$(uci -q -c /var/run/tyfza1-factory get pon_factory.pon.mode)
 	[ -n "$mode" ] || return 1
 	pon_stage=bosa
 	if ! printf '1\n' > "$device/bosa"; then

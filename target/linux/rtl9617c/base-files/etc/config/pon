@@ -1,6 +1,3 @@
 config pon 'pon'
 	option enabled '1'
-	option mode 'xgpon'
-	option serial_number '59485443E2775C62'
-	option onu_mac 'fc:34:e2:77:5c:63'
 	option llid_count '1'

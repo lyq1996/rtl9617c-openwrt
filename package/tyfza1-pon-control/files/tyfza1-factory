@@ -27,7 +27,7 @@ start() {
 	local runtime=/tmp/tyfza1-factory
 	local runstate=/var/run/tyfza1-factory
 	local factory_volume=
-	local device base_mac epon_mac serial pon_factory
+	local device base_mac epon_mac serial mode pon_factory
 
 	rm -rf "$runtime" "$runstate"
 	if [ ! -d /sys/class/ubi/ubi0 ]; then
@@ -69,6 +69,7 @@ start() {
 	factory_blob $((0x4000)) 1024 "$runtime/rtl9617c/bosa-calibration.bin"
 
 	serial=$(factory_read $((0x1020)) 16 | tr -d '\000\377')
+	mode=$(factory_read $((0x1030)) 16 | tr -d '\000\377')
 	epon_mac=$(factory_mac $((0x1010)))
 	if [ "${#epon_mac}" != 12 ] || [ "$epon_mac" = ffffffffffff ]; then
 		epon_mac=
@@ -78,9 +79,11 @@ start() {
 
 	mkdir -p "$runstate"
 	chmod 0700 "$runstate"
-	if [ -n "$serial" ] || [ -n "$epon_mac" ]; then
+	if [ -n "$mode" ] || [ -n "$serial" ] || [ -n "$epon_mac" ]; then
 		pon_factory="$runstate/pon_factory"
 		echo "config pon 'pon'" > "$pon_factory"
+		[ -n "$mode" ] && \
+			echo "	option mode '$mode'" >> "$pon_factory"
 		[ -n "$serial" ] && \
 			echo "	option serial_number '$serial'" >> "$pon_factory"
 		[ -n "$epon_mac" ] && \
