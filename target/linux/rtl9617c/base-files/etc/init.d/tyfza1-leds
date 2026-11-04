@@ -3,15 +3,33 @@
 START=96
 USE_PROCD=1
 
-start_service() {
-	local mode
+# The panel lamps and the PON state lamp are driven from user space by
+# /usr/share/tyfza1/leds.uc, which polls the PON driver's led_state and sets
+# LED_LOS / LED_PON. Start it unconditionally: a missing helper must not take
+# the whole service down, or both lamps stay dark forever.
+#
+# /sys/devices/platform/leds/mode only exists when the board is bound to the
+# tianyi,tyfza1-leds controller. This board's device tree uses the standard
+# gpio-leds binding, so that node is absent here. The old revision wrote to it
+# unconditionally and returned on failure, which silently prevented the ucode
+# helper from ever running (procd reported "active with no instances" and
+# neither LED_PON nor LED_LOS was driven). Treat it as optional.
+apply_led_mode() {
+	local mode node=/sys/devices/platform/leds/mode
+
 	config_load system
 	config_get mode led_control mode 2
-	printf '%s\n' "$mode" > /sys/devices/platform/leds/mode || return $?
+	[ -w "$node" ] || return 0
+	printf '%s\n' "$mode" > "$node"
+}
+
+start_service() {
+	apply_led_mode
 	procd_open_instance
 	procd_set_param command /usr/bin/ucode /usr/share/tyfza1/leds.uc
 	procd_set_param stdout 1
 	procd_set_param stderr 1
+	procd_set_param respawn
 	procd_close_instance
 }
 
@@ -20,10 +38,7 @@ service_triggers() {
 }
 
 reload_service() {
-	local mode
-	config_load system
-	config_get mode led_control mode 2
-	printf '%s\n' "$mode" > /sys/devices/platform/leds/mode
+	apply_led_mode
 }
 
 stop_service() {
