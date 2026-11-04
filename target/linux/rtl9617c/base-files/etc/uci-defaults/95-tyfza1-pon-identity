@@ -1,0 +1,12 @@
+#!/bin/sh
+# Ensure the PT1500 PON identity survives sysupgrade (rootfs_data keeps the
+# old /etc/config/pon, so the defaults in the image are not re-applied).
+[ -f /etc/config/pon ] || exit 0
+
+uci -q get pon.pon.mode >/dev/null || uci set pon.pon.mode='xgpon'
+uci -q get pon.pon.serial_number >/dev/null || \
+	uci set pon.pon.serial_number='59485443E2775C62'
+uci -q get pon.pon.onu_mac >/dev/null || \
+	uci set pon.pon.onu_mac='fc:34:e2:77:5c:63'
+uci commit pon
+exit 0

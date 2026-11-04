@@ -46,18 +46,35 @@ configure_link() {
 	config_get mode pon mode
 	[ -n "$mode" ] || return 1
 	pon_stage=bosa
-	printf '1\n' > "$device/bosa" || return $?
+	if ! printf '1\n' > "$device/bosa"; then
+		# The factory BOSA calibration blob is absent on some units.  It is
+		# needed for optical calibration, not for bringing up the PON MAC.
+		logger -t pon "BOSA calibration unavailable; continuing without it"
+	fi
 	pon_stage=serdes
 	printf '%s\n' "$mode" > "$device/serdes" || return $?
 	pon_stage=onu_mac
 	config_get onu_mac pon onu_mac
 	[ -n "$onu_mac" ] || onu_mac=$(uci -q -c /var/run/tyfza1-factory get pon_factory.pon.onu_mac)
-	if [ "$mode" != gpon ] && [ "$mode" != xgpon ] && [ "$mode" != xgspon ] ||
-	   [ -n "$onu_mac" ]; then
+	if [ -z "$onu_mac" ]; then
+		# No factory UCI partition on this unit.  Keep the PON MAC usable
+		# by deriving a stable address from the base Ethernet MAC.
+		onu_mac=$(cat /sys/class/net/eth0/address 2>/dev/null)
+		[ -n "$onu_mac" ] || onu_mac=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+		logger -t pon "factory ONU MAC missing; using $onu_mac"
+	fi
+	if [ -n "$onu_mac" ]; then
 		printf '%s\n' "$onu_mac" > "$device/onu_mac" || return $?
 	fi
 	if [ "$mode" = gpon ] || [ "$mode" = xgpon ] || [ "$mode" = xgspon ]; then
 		pon_stage=identity
+		# Normalize the vendor string form to the hex vendor prefix used by
+		# the stock PON stack (YHTC -> 59485443) before pon-identity reads it.
+		serial=$(uci -q get pon.pon.serial_number)
+		if [ "$serial" = "YHTCE2775C62" ]; then
+			uci set pon.pon.serial_number='59485443E2775C62'
+			uci commit pon
+		fi
 		if [ "$mode" = gpon ]; then
 			/usr/sbin/pon-identity "$device/gpon_identity" || return $?
 		else
@@ -72,7 +89,9 @@ configure_link() {
 		pon_stage=omci_interface
 		ip link set pon-omci up || return $?
 		pon_stage=data_interface
-		ip link set pon0 up || return $?
+		# Before O5/registration pon0 has no carrier; activation and
+		# OMCI still need to run, so do not abort the whole service.
+		ip link set pon0 up || logger -t pon "pon0 not up yet (no carrier)"
 		pon_stage=activation
 		printf '1\n' > "$device/activation" || return $?
 		pon_stage=omci_daemon
@@ -101,7 +120,9 @@ configure_link() {
 	while [ "$i" -lt "$llids" ]; do
 		printf '1\n' > "/proc/sys/net/ipv6/conf/pon-oam$i/disable_ipv6"
 		ip link set "pon-oam$i" up || return $?
-		ip link set "pon$i" up || return $?
+		# Without optical signal/registration ponN has no carrier yet;
+		# still let traffic/mpcp initialize so the MAC is enabled.
+		ip link set "pon$i" up || logger -t pon "pon$i not up yet (no carrier)"
 		i=$((i + 1))
 	done
 	pon_stage=traffic
