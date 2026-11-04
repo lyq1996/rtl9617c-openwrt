@@ -11,8 +11,10 @@ return view.extend({
 			return E('div', {}, [data.pon ? status.ponCard(pon) : E('p', { class: 'alert-message warning' }, 'PON 状态读取失败。'),
 				ui.grid([
 					ui.tile('运行协议', status.modes[(pon.serdes || {}).mode] || '未提供', '来自驱动实际运行模式'),
-					ui.tile('光口发射', optical.tx_disabled == null ? '未提供' : optical.tx_disabled === '1' ? '已关闭' : '已允许', '光功率 / 温度尚无读取接口'),
-					ui.tile('光学校准', bosa.configured == null ? '未提供' : bosa.configured === '1' ? '已配置' : '未就绪', '沿用原厂数据加载机制')
+					ui.tile('光模块温度', status.temperature(pon.transceiver), '来自 A2h 0x60/0x61'),
+					ui.tile('收 / 发光功率', status.power((pon.transceiver || {}).rx_power_raw) + ' / ' + status.power((pon.transceiver || {}).tx_power_raw), 'A2h 0x66~0x69'),
+					ui.tile('光口发射', optical.tx_disabled == null ? '未提供' : optical.tx_disabled === '1' ? '已关闭' : '已允许', 'A2h 光模块遥测'),
+					ui.tile('光学校准', bosa.configured == null ? '未提供' : bosa.configured === '1' ? '已配置' : '未就绪', 'A2H 模块已识别，DDMI 可用')
 				]),
 				ui.grid([status.card('注册与认证', null, ui.authentication(pon)), status.offloadCard(pon)]),
 				status.card('业务网络', null, [ui.networks(data), ui.link('管理上网', 'admin/onu/internet')]),
@@ -24,7 +26,7 @@ return view.extend({
 				})) : ui.note('未发现无线接口；请检查无线配置与校准加载状态。'), ui.link('管理 Wi-Fi 6', 'admin/network/wireless')]),
 				ui.fold('物理端口与累计流量', 'ports', ui.ports(pon)),
 				ui.fold('OLT 下发的 GEM 业务通道', 'paths', ui.services(pon)),
-				ui.note((data.board.model || 'TYFZA1') + ' · ' + ((data.board.release || {}).description || '固件信息未提供'))
+				ui.note((data.board.model || 'PT1500') + ' · ' + ((data.board.release || {}).description || '固件信息未提供'))
 			]);
 		});
 	},

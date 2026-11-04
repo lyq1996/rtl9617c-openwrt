@@ -10,6 +10,44 @@ var modes = {
 
 function value(v) { return v == null || v === '' ? '—' : String(v); }
 function flag(v) { return v === '1' || v === 1 || v === true; }
+function s16(raw) {
+	var n = Number(raw);
+	return isFinite(n) && (n & 0x8000) ? n - 0x10000 : n;
+}
+function temperature(data) {
+	var raw = (data || {}).temperature_raw;
+	if (raw == null || raw === '') return '—';
+	return (s16(raw) / 256).toFixed(1) + ' °C';
+}
+function voltage(data) {
+	var raw = Number((data || {}).voltage_raw);
+	return isFinite(raw) && raw > 0 ? (raw * 100e-6).toFixed(3) + ' V' : '—';
+}
+function bias(data) {
+	var raw = Number((data || {}).bias_raw);
+	return isFinite(raw) && raw > 0 ? (raw * 2e-3).toFixed(2) + ' mA' : '—';
+}
+function power(raw) {
+	var n = Number(raw);
+	if (!isFinite(n) || n <= 0) return '—';
+	return (10 * Math.log10(n * 0.1e-3)).toFixed(2) + ' dBm';
+}
+function opticalRows(data) {
+	var t = (data || {}).transceiver || {};
+	return [['温度', temperature(t)], ['电压', voltage(t)],
+		['Tx 偏置', bias(t)], ['Tx 光功率', power(t.tx_power_raw)],
+		['Rx 光功率', power(t.rx_power_raw)]];
+}
+function bosaName(bosa) {
+	if (!bosa) return '—';
+	if (bosa.identity) {
+		var text = bosa.identity.split('/').map(function(hex) {
+			return String.fromCharCode(parseInt(hex, 16));
+		}).join('');
+		if (/^[\x20-\x7e]{2,}$/.test(text)) return text;
+	}
+	return value(bosa.model);
+}
 function badge(text, tone) { return E('span', { class: 'tyf-badge tyf-' + (tone || 'muted') }, [text]); }
 function rows(items) {
 	return E('dl', { class: 'tyf-facts' }, items.reduce(function(nodes, item) {
@@ -79,7 +117,7 @@ function ponCard(data) {
 			['运行协议', modes[serdes.mode] || value(serdes.mode)],
 			['接收光信号', los],
 			['发射告警', optical.tx_fault == null ? '未提供' : flag(optical.tx_fault) ? '发射故障' : '无发射故障']
-		]))
+		].concat(opticalRows(data))))
 	]);
 }
 
@@ -95,6 +133,7 @@ function offloadCard(data) {
 
 return baseclass.extend({
 	modes: modes, value: value, badge: badge, rows: rows, card: card,
+	temperature: temperature, voltage: voltage, power: power, opticalRows: opticalRows, bosaName: bosaName,
 	omciLive: omciLive, ponState: ponState, ponCard: ponCard, offloadCard: offloadCard,
 	// Track the CSS content independently of LuCI's version across sysupgrades.
 	style: function() { return E('link', { rel: 'stylesheet', href: L.resource('tyfza1/status.css') + '?v=9f264a673f8f' }); },

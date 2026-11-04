@@ -35,6 +35,12 @@ function fields(text) {
 	return result;
 }
 
+function factory_serial() {
+	let text = readfile('/var/run/tyfza1-factory/pon_factory');
+	let entry = text == null ? null : match(text, /option\s+serial_number\s+'([^']*)'/);
+	return entry ? entry[1] : null;
+}
+
 function status_live(status, now_ms) {
 	if (type(status.pid) != 'int' || status.pid <= 0 || type(status.updated_ms) != 'int')
 		return false;
@@ -89,7 +95,7 @@ const methods = {
 			return {
 				identity: {
 					onu_mac: read_value(device + 'onu_mac'),
-					serial_number: read_value(device + 'active_serial_number')
+					serial_number: read_value(device + 'active_serial_number') || factory_serial()
 				},
 				service: fields(readfile('/var/run/pon-service')),
 				activation: fields(readfile(device + 'activation')),
@@ -104,6 +110,7 @@ const methods = {
 				traffic: fields(readfile(device + 'traffic')),
 				fe: fields(readfile(device + 'fe')),
 				optical: fields(readfile(device + 'optical')),
+				transceiver: fields(readfile(device + 'transceiver')),
 				fec: fields(readfile(device + 'fec')),
 				puc: readfile(device + 'puc'),
 				pdc: readfile(device + 'pdc'),

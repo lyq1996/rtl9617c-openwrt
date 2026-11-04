@@ -63,7 +63,7 @@ define Device/youhua_pt1500_h10_2p5g
   DEVICE_DTS_DIR := ../dts
   # Select the Web UI in the board profile as well as .config, so it is
   # included when multi-profile builds assemble this board's rootfs.
-  DEVICE_PACKAGES := fitblk tyfza1-pon-control kmod-usb3 block-mount \
+  DEVICE_PACKAGES := fitblk tyfza1-pon-control luci-app-tyfza1-pon kmod-usb3 block-mount \
 	luci-ssl luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn
   KERNEL := kernel-bin | gzip
   KERNEL_INITRAMFS := kernel-bin | gzip | \

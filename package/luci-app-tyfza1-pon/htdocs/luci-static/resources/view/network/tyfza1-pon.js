@@ -122,7 +122,7 @@ return view.extend({
 		o = s.taboption('advanced', form.DummyValue, '_acceleration', '硬件流量卸载');
 		o.cfgvalue = function() { return ui.link('打开硬件加速设置', 'admin/onu/acceleration'); };
 		return m.render().then(function(form) {
-			return ui.page('线路与认证', '使用 TYFZA1 原生配置。只修改运营商要求的参数，应用时光链路可能短暂中断。',
+			return ui.page('线路与认证', '使用本机原生配置。只修改运营商要求的参数，应用时光链路可能短暂中断。',
 				data[1], status.callStatus, function(next) {
 					return E('div', {}, [status.ponCard(next), ui.fold('查看实时注册与认证', 'auth', ui.authentication(next))]);
 				}, E('section', { class: 'tyf-config' }, form));

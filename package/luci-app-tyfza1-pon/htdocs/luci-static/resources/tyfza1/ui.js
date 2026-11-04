@@ -127,6 +127,11 @@ function networks(data) {
 }
 function page(title, description, initial, read, render, form) {
 	var last = initial == null ? null : new Date(), pending;
+	var eyebrow = E('p', { class: 'tyf-eyebrow' }, 'PT1500 / ONU');
+	board().then(function(info) {
+		if (info && info.model)
+			eyebrow.textContent = info.model + ' / ONU';
+	}).catch(function() {});
 	var warning = E('p', { class: 'alert-message warning', role: 'status', hidden: initial != null }, '状态读取失败，尚无实时数据。配置编辑不受影响。');
 	var live = E('div', { class: 'tyf-live' }, initial == null ? null : render(initial));
 	var updated = E('span', { class: 'tyf-updated' });
@@ -151,7 +156,7 @@ function page(title, description, initial, read, render, form) {
 	showTime();
 	poll.add(refresh, 5);
 	return E('div', { class: 'tyf-pon cbi-map' }, [status.style(),
-		E('div', { class: 'tyf-page-header' }, [E('div', {}, [E('p', { class: 'tyf-eyebrow' }, 'TYFZA1 / ONU'), E('h2', {}, title), note(description)]),
+		E('div', { class: 'tyf-page-header' }, [E('div', {}, [eyebrow, E('h2', {}, title), note(description)]),
 			E('div', { class: 'tyf-refresh-controls' }, [updated, button])]), warning, live, form || null]);
 }
 
