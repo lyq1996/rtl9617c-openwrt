@@ -1,0 +1,9 @@
+#!/bin/sh
+# rpcd ignores world-writable ucode scripts.  The build host is an NTFS mount
+# where source modes are always 0777, so fix them before rpcd starts.
+for script in /usr/share/rpcd/ucode/luci.tyfza1-pon \
+	      /usr/share/rpcd/ucode/luci.tyfza1-system; do
+	[ -f "$script" ] && chmod 0755 "$script"
+done
+/etc/init.d/rpcd restart >/dev/null 2>&1
+exit 0

@@ -75,6 +75,8 @@ static int rtl_bosa_identify(struct rtl_bosa *bosa)
 	else if (!memcmp(bosa->identity, "\xa1\0\0", 3))
 		bosa->model = RTL_BOSA_GN28L95;
 	else {
+		u8 t_hi = 0xff, t_lo = 0xff;
+
 		ret = rtl_bosa_write(bosa, 0x7f, 2);
 		if (ret)
 			return ret;
@@ -85,8 +87,29 @@ static int rtl_bosa_identify(struct rtl_bosa *bosa)
 			bosa->model = RTL_BOSA_GN25L95;
 		else if ((id & 0xf0) == 0xc0)
 			bosa->model = RTL_BOSA_GN25L98;
-		else
-			return -ENODEV;
+		else {
+			/* A2h-only bare BOSA: A0h is all 0xff and the vendor
+			 * pages carry no GN28L/25L ID.  A plausible base-page
+			 * temperature identifies the module; its calibration
+			 * and DDMI live in A2h. */
+			ret = rtl_bosa_write(bosa, 0x7f, 0);
+			if (ret)
+				return ret;
+			ret = rtl_bosa_read(bosa, 0x60, &t_hi);
+			if (!ret)
+				ret = rtl_bosa_read(bosa, 0x61, &t_lo);
+			if (ret)
+				return ret;
+			if ((t_hi == 0xff && t_lo == 0xff) ||
+			    (t_hi == 0x00 && t_lo == 0x00))
+				return -ENODEV;
+			bosa->identity[0] = 'A';
+			bosa->identity[1] = '2';
+			bosa->identity[2] = 'H';
+			bosa->model = RTL_BOSA_A2H;
+			bosa->eeprom = true;
+			return 0;
+		}
 	}
 	ret = rtl_bosa_write(bosa, 0x7f, bosa->model >= RTL_BOSA_GN28L96 ? 0x81 : 2);
 	if (ret)

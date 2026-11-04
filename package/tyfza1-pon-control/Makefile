@@ -40,6 +40,7 @@ endef
 define Package/tyfza1-pon-control/install
 	$(INSTALL_DIR) $(1)/lib/firmware/realtek/rtl9617c
 	$(LN) /tmp/tyfza1-factory/rtl9617c/bosa-calibration.bin $(1)/lib/firmware/realtek/rtl9617c/bosa-calibration.bin
+	$(LN) /tmp/tyfza1-factory/rtl9617c/a2h.bin $(1)/lib/firmware/realtek/rtl9617c/a2h.bin
 	$(INSTALL_DIR) $(1)/lib/firmware/realtek/tyfza1/rtl8852ce
 	$(LN) /tmp/tyfza1-factory/tyfza1/rtl8852ce/flash-calibration.bin $(1)/lib/firmware/realtek/tyfza1/rtl8852ce/flash-calibration.bin
 	$(INSTALL_DIR) $(1)/lib/firmware/realtek/tyfza1/rtl8192xbe

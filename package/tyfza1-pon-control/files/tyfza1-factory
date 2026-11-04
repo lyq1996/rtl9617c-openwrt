@@ -67,6 +67,10 @@ start() {
 	factory_blob $((0x2000)) 4096 "$runtime/tyfza1/rtl8852ce/flash-calibration.bin"
 	factory_blob $((0x3000)) 4096 "$runtime/tyfza1/rtl8192xbe/flash-calibration.bin"
 	factory_blob $((0x4000)) 1024 "$runtime/rtl9617c/bosa-calibration.bin"
+	if [ "$(factory_read $((0x5000)) 7)" = PONA2H1 ]; then
+		factory_read $((0x5000)) 520 > "$runtime/rtl9617c/a2h.bin"
+		chmod 0644 "$runtime/rtl9617c/a2h.bin"
+	fi
 
 	serial=$(factory_read $((0x1020)) 16 | tr -d '\000\377')
 	mode=$(factory_read $((0x1030)) 16 | tr -d '\000\377')
