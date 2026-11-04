@@ -1541,11 +1541,33 @@ static int rtl_phy_led_output(struct tyfza1_led *led, unsigned int value)
 		return -ENODEV;
 	if (channel >= RTL_PHY_LED_COUNT)
 		return -EINVAL;
-	/* One LCR per channel; 0xd044 is channel 0. */
+	if (priv->ports[6]) {
+		/* Upstream RTL8221B LED model: 0xd032 + 2*channel selects the
+		 * hardware link speeds (bit5 = 2.5G), 0xd040 bit channel
+		 * enables activity blink, and 0xd044 bit channel is polarity
+		 * (1 = inverted/manual on, 0 = normal).  Any non-zero
+		 * brightness means "hardware link/activity"; 0 means off. */
+		reg = 0xd032 + channel * 2;
+		if (value) {
+			int ret;
+
+			ret = phy_write_mmd(dev->phydev, MDIO_MMD_VEND2, reg, 0x25);
+			if (ret < 0)
+				return ret;
+			ret = phy_set_bits_mmd(dev->phydev, MDIO_MMD_VEND2,
+					       0xd040, BIT(channel));
+			if (ret < 0)
+				return ret;
+			/* The panel LED is low-active on this board: the PHY's
+			 * "normal" polarity is inverted at the lamp, so set the
+			 * polarity bit to get link on / idle off / traffic blink. */
+			return phy_set_bits_mmd(dev->phydev, MDIO_MMD_VEND2,
+					       0xd044, BIT(channel));
+		}
+		return phy_write_mmd(dev->phydev, MDIO_MMD_VEND2, reg, 0);
+	}
+	/* Legacy PT4 path: keep the previous per-channel LCR address. */
 	reg = 0xd044 + channel * 2;
-	/* 0 = PHY owns link/activity (the reference state). 1 = force on,
-	 * which is the only forced state worth exposing; values above 1 are
-	 * accepted by the class but carry no extra meaning here. */
 	return phy_modify_mmd(dev->phydev, MDIO_MMD_VEND2, reg, 0x11,
 			       value == 0 ? 0x00 : 0x01);
 }
@@ -1736,7 +1758,9 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 			led->output = rtl_phy_led_output;
 			led->drvdata = priv;
 			led->channel = ch;
-			led->requested = 0;
+			/* P6 defaults to hardware link/activity; the PT4
+			 * fallback keeps the old "PHY owns" state. */
+			led->requested = port == 6 ? 255 : 0;
 			led->cdev.name = devm_kasprintf(parent, GFP_KERNEL,
 							"%s%u", prefix, ch);
 			if (!led->cdev.name)
