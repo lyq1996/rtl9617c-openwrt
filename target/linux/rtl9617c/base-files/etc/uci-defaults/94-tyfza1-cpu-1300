@@ -1,6 +1,0 @@
-#!/bin/sh
-# Migrate the previous 1200 MHz default to the new 1300 MHz OPP.
-[ "$(uci -q get system.cpu.frequency)" = 1200000 ] || exit 0
-uci set system.cpu.frequency='1300000'
-uci commit system
-exit 0

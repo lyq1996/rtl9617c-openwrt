@@ -1,0 +1,7 @@
+#!/bin/sh
+# r72 briefly made 1300 MHz the default.  Boot the first upgraded image at
+# the previously stable 1200 MHz; the CPU page still offers 1300 MHz.
+[ "$(uci -q get system.cpu.frequency)" = 1300000 ] || exit 0
+uci set system.cpu.frequency='1200000'
+uci commit system
+exit 0
