@@ -45,6 +45,7 @@ static const struct rtl_cpu_rate rtl_cpu_rates[] = {
 	{ 1000000000, 200, 5, 1 },
 	{ 1100000000, 220, 5, 1 },
 	{ 1200000000, 240, 5, 1 },
+	{ 1300000000, 260, 5, 1 },
 };
 
 struct rtl_cpu_clock {
