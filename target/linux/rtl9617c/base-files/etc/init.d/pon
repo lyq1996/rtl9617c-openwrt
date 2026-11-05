@@ -66,6 +66,10 @@ configure_link() {
 	fi
 	if [ -n "$onu_mac" ]; then
 		printf '%s\n' "$onu_mac" > "$device/onu_mac" || return $?
+		# The EPON data netdev must source PPPoE from the same MAC that
+		# the OLT authenticates; the stock factory blob uses the LAN
+		# base MAC here, which breaks MAC-based authentication.
+		printf '%s\n' "$onu_mac" > "$device/data_mac" || return $?
 	fi
 	if [ "$mode" = gpon ] || [ "$mode" = xgpon ] || [ "$mode" = xgspon ]; then
 		pon_stage=identity
