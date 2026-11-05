@@ -101,9 +101,5 @@ start() {
 			[ -e "$device" ] || continue
 			ip link set dev "${device##*/}" address "$base_mac" || return $?
 		done
-		device=/sys/bus/platform/devices/4f5500000.pon
-		if [ -d "$device" ]; then
-			cat "$runtime/lan_mac" > "$device/data_mac" || return $?
-		fi
 	fi
 }
