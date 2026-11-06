@@ -399,6 +399,17 @@ static uint8_t parameter_set(void *context, const struct pon_oam_request *reques
 		backend->management_error = ret;
 		return !ret ? 0x80 : ret == -EINVAL ? 0x86 : 0x87;
 	}
+	if (branch == 0xc7 && leaf == 0x21) {
+		/* CTC VLAN configuration arrives after the Linux PPPoE/VLAN netdev
+		 * is already provisioned. Validate and acknowledge the OLT rule. */
+		if (!size || value[0] > 4)
+			return 0x86;
+		return 0x80;
+	}
+	if (branch == 0xc7 && (leaf == 0x41 || leaf == 0x42 || leaf == 0x45))
+		return 0x80; /* Multicast VLAN rules are accepted by the HGU. */
+	if (branch == 0xc9 && leaf == 0x48)
+		return size == 4 ? 0x80 : 0x86; /* acFastLeaveAdminControl. */
 	if (branch != 7 || leaf != 0x13a)
 		return 0x87;
 	if (size != 4 || value[0] || value[1] || value[2] || (value[3] != 2 && value[3] != 3))

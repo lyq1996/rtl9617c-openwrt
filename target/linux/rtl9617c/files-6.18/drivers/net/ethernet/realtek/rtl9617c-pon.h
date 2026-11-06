@@ -13,6 +13,8 @@
 #include "rtl9617c-pon-path.h"
 #include "rtl9617c-xgtc-recovery.h"
 
+struct sock;
+
 struct rtl_itu_path_state {
 	struct rcu_head rcu;
 	struct rtl_itu_paths paths;
@@ -125,6 +127,7 @@ struct rtl9617c_pon {
 	bool puc_configured;
 	int puc_error;
 	struct rtl9617c_ni_endpoint oam_endpoint;
+	struct sock *oam_netlink;
 	struct net_device __rcu *oam_devices[32];
 	struct net_device __rcu *data_devices[32];
 	u8 pdc_source[64];

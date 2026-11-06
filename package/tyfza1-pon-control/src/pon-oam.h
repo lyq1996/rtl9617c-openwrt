@@ -6,6 +6,10 @@
 #include <stdint.h>
 
 #define PON_OAM_FRAME_MAX 1514
+/* The OAM TLV length field includes the two-byte type/length header, so a
+ * Local/Remote Information TLV carries 14 bytes of value. */
+#define PON_OAM_INFO_TLV_LEN 16
+#define PON_OAM_INFO_VALUE_LEN (PON_OAM_INFO_TLV_LEN - 2)
 
 /* Receive result: negative errno = invalid, 0 = ignored, 1 = handled without
  * a reply; 60..FRAME_MAX = validated reply length. Only handled PDUs are live. */
@@ -51,8 +55,8 @@ enum pon_oam_auth {
 };
 
 struct pon_oam_session {
-	uint8_t peer_local[14];
-	uint8_t last_local[14];
+	uint8_t peer_local[PON_OAM_INFO_VALUE_LEN];
+	uint8_t last_local[PON_OAM_INFO_VALUE_LEN];
 	uint8_t extension_oui[3];
 	uint8_t extension_version;
 	uint16_t peer_flags;

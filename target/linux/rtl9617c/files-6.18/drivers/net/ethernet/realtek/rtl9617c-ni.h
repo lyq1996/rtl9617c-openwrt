@@ -20,6 +20,7 @@ struct rtl9617c_ni_frame {
 	const u8 *prefix;
 	unsigned int prefix_length;
 	bool raw_payload;
+	bool oam;
 };
 
 struct rtl9617c_ni_wifi_endpoint {

@@ -154,6 +154,7 @@ netdev_tx_t rtl_dma_tx_frame(struct rtl_dma_tx *tx, struct sk_buff *skb,
 	unsigned int length = (frame && frame->raw_payload ? skb->len : max(skb->len, 60U)) + prefix;
 	u32 high = frame ? frame->header_high : BIT(13);
 	u32 low = frame ? frame->header_low : (16 << 9) | (tx->port << 3) | BIT(29);
+	u32 control = frame && frame->oam ? 0x61000000U : 0x61000002U;
 
 	rtl_dma_tx_complete(tx, dev);
 	if (!rtl_dma_tx_available(tx)) {
@@ -172,7 +173,7 @@ netdev_tx_t rtl_dma_tx_frame(struct rtl_dma_tx *tx, struct sk_buff *skb,
 		memcpy(tx->memory + offset + 16, frame->prefix, prefix);
 	skb_copy_bits(skb, 0, tx->memory + offset + 16 + prefix, skb->len);
 	tx->descriptors[tx->write].address = cpu_to_le32(tx->memory_dma + offset);
-	tx->descriptors[tx->write].control = cpu_to_le32(0x61000002U | ((length + 16) << 8));
+	tx->descriptors[tx->write].control = cpu_to_le32(control | ((length + 16) << 8));
 	tx->lengths[tx->write] = skb->len;
 	tx->owners[tx->write] = dev;
 	dma_wmb();

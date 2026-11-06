@@ -5,10 +5,32 @@
 #include <linux/netdevice.h>
 #include <linux/rcupdate.h>
 #include <linux/rtnetlink.h>
+#include <linux/netlink.h>
+#include <net/netlink.h>
+#include <net/sock.h>
+#include <linux/module.h>
 #include "rtl9617c-pon.h"
 #include "rtl9617c-ni.h"
 #include "rtl9617c-pon-oam-format.h"
 #include "rtl9617c-pon-omci-format.h"
+
+static unsigned int rtl_oam_egress = 15;
+module_param_named(oam_egress, rtl_oam_egress, uint, 0644);
+
+static unsigned int rtl_data_port = 0;
+module_param_named(data_port, rtl_data_port, uint, 0644);
+
+static unsigned int rtl_data_queue = 0;
+module_param_named(data_queue, rtl_data_queue, uint, 0644);
+
+struct rtl_oam_nl_frame {
+	u16 type;
+	u16 llid;
+	u32 length;
+	u8 data[];
+} __packed;
+
+static struct rtl9617c_pon *rtl_oam_netlink_pon;
 
 struct rtl_oam_port {
 	struct rtl9617c_pon *pon;
@@ -76,9 +98,12 @@ static netdev_tx_t rtl_oam_transmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned int llid = ((struct rtl_oam_port *)netdev_priv(dev))->llid;
 	struct rtl9617c_ni_frame frame = {
 		.header_high = BIT(13),
-		.header_low = 7 | (15 << 3) | (17 << 9) | BIT(29),
+		/* Runtime test knob: stock maps OAM via NI7/LDPID15. */
+		.header_low = 7 | (((rtl_oam_egress & 0x3f) + llid) << 3) |
+			      (17 << 9) | BIT(29),
 		.prefix = prefix,
 		.prefix_length = RTL_OAM_PREFIX_BYTES,
+		.oam = true,
 	};
 
 	if (!rtl_pon_mode_is_epon(READ_ONCE(pon->mode)) || !netif_carrier_ok(dev) ||
@@ -93,6 +118,41 @@ static netdev_tx_t rtl_oam_transmit(struct sk_buff *skb, struct net_device *dev)
 	return rtl9617c_ni_transmit(pon->ni_dev, dev, skb, &frame);
 }
 
+static void rtl_oam_netlink_receive(struct sk_buff *skb)
+{
+	struct rtl9617c_pon *pon = rtl_oam_netlink_pon;
+	struct nlmsghdr *nlh = nlmsg_hdr(skb);
+	struct rtl_oam_nl_frame *msg;
+	struct net_device *dev;
+	struct sk_buff *tx;
+	unsigned int llid;
+
+	if (!pon || nlh->nlmsg_len < NLMSG_HDRLEN + sizeof(*msg))
+		return;
+	msg = nlmsg_data(nlh);
+	if (msg->type != 2 || msg->length > 1522 ||
+	    nlh->nlmsg_len < NLMSG_HDRLEN + sizeof(*msg) + msg->length)
+		return;
+	llid = msg->llid & 31;
+	rcu_read_lock();
+	dev = rcu_dereference(pon->oam_devices[llid]);
+	if (dev)
+		dev_hold(dev);
+	rcu_read_unlock();
+	if (!dev)
+		return;
+	tx = alloc_skb(msg->length, GFP_ATOMIC);
+	if (!tx) {
+		dev_put(dev);
+		return;
+	}
+	skb_put_data(tx, msg->data, msg->length);
+	tx->dev = dev;
+	tx->protocol = htons(ETH_P_8021Q);
+	rtl_oam_transmit(tx, dev);
+	dev_put(dev);
+}
+
 static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct rtl_oam_port *port = netdev_priv(dev);
@@ -100,7 +160,10 @@ static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev
 	unsigned int queues = READ_ONCE(pon->llid_count) > 16 ? 4 : 8;
 	struct rtl9617c_ni_frame frame = {
 		.header_high = BIT(30), /* Business packets use the native deep queue. */
-		.header_low = (skb->priority & (queues - 1)) | ((32 + port->llid) << 3) |
+		/* Stock dal_rtl8277c_ponmac_queue_add() registers the business
+		 * queues on PUC port 0 (queueId 0..7), not on port 7. */
+		.header_low = (rtl_data_queue & (queues - 1)) |
+			      ((rtl_data_port + port->llid) << 3) |
 			      (16 << 9) | BIT(29),
 	};
 
@@ -416,6 +479,16 @@ int rtl_pon_oam_init(struct rtl9617c_pon *pon)
 		rtl9617c_ni_pon_detach(pon->ni_dev);
 		goto free;
 	}
+	{
+		struct netlink_kernel_cfg cfg = {
+			.input = rtl_oam_netlink_receive,
+		};
+		rtl_oam_netlink_pon = pon;
+		pon->oam_netlink = netlink_kernel_create(&init_net,
+			NETLINK_USERSOCK, &cfg);
+		if (!pon->oam_netlink)
+			dev_warn(pon->dev, "OAM netlink redirect unavailable\n");
+	}
 	dev_info(pon->dev, "%s: native per-LLID EPON OAM transport via NI CPU0/VP8\n", dev->name);
 	return 0;
 free:
@@ -428,6 +501,12 @@ free:
 
 void rtl_pon_oam_remove(struct rtl9617c_pon *pon)
 {
+	if (pon->oam_netlink) {
+		netlink_kernel_release(pon->oam_netlink);
+		pon->oam_netlink = NULL;
+	}
+	if (rtl_oam_netlink_pon == pon)
+		rtl_oam_netlink_pon = NULL;
 	rtl9617c_ni_pon_detach(pon->ni_dev);
 	rtl_pon_itu_paths_remove(pon);
 	rtl_pon_oam_resize(pon, 0);

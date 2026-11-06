@@ -75,14 +75,14 @@ static int rtl_puc_token_buckets(struct rtl9617c_pon *pon, unsigned int first)
 	int ret;
 
 	for (queue = first; queue < 256; queue++) {
-		/* CIR disabled; PIR unlimited, as stock EPON initialization. */
+		/* Stock EPON queue_add uses CIR=0, PIR=32767999. */
 		writel(0, pon->mac + CIR_DATA0);
 		writel(2 << 6, pon->mac + CIR_DATA1);
 		ret = rtl_puc_access(pon, CIR_ACCESS, queue, true);
 		if (ret)
 			return ret;
-		writel(~0U, pon->mac + PIR_DATA0);
-		writel(0x3f | (2 << 6), pon->mac + PIR_DATA1);
+		writel(32767999U, pon->mac + PIR_DATA0);
+		writel(2 << 6, pon->mac + PIR_DATA1);
 		ret = rtl_puc_access(pon, PIR_ACCESS, queue, true);
 		if (ret)
 			return ret;
@@ -246,14 +246,27 @@ int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
 		writel(0x55555555, pon->mac + LIMIT_SELECT + i * 4);
 	writel(queues == 4 ? 1 : 0, pon->mac + VOQ_MODE);
 	for (i = 0; i < 64; i++) {
-		ret = rtl_puc_port(pon, i, queues, i < ports);
+		/* Port 0 is the LLID data port, port 7 is stock nas0 business
+		 * egress and port 12 is the OAM physical port (NI7 queue 9). */
+		ret = rtl_puc_port(pon, i, queues, i < ports || i == 7 || i == 12);
 		if (ret)
 			goto unlock;
 	}
 	for (i = 0; i < 8; i++) {
 		unsigned int active = ports * queues;
-		u32 valid = i < active / 32 ? ~0U : i == active / 32 && active % 32 ?
-			    GENMASK(active % 32 - 1, 0) : 0;
+		unsigned int data_first = 7 * queues;
+		unsigned int oam_first = 12 * queues;
+		u32 valid = 0;
+		unsigned int q;
+
+		for (q = 0; q < 256; q++) {
+			bool enabled = q < active ||
+				(q >= data_first && q < data_first + queues) ||
+				(q >= oam_first && q < oam_first + queues);
+
+			if (enabled && q / 32 == i)
+				valid |= BIT(q % 32);
+		}
 		/* Queue127 is the stock special control queue. */
 		if (i == 3)
 			valid |= BIT(31);
@@ -277,6 +290,12 @@ int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
 	rtl_pon_update(pon->mac + CONTROL, BIT(30) | BIT(26), BIT(30));
 	rtl_pon_update(pon->mac + CONTROL1, GENMASK(14, 0), 20 | (20 << 5) | (20 << 10));
 	rtl_pon_update(pon->mac + CONTROL2, BIT(26) | GENMASK(4, 0), BIT(26) | 20);
+	/* Stock dal_rtl8277c_ponmac_queue_add() ends with
+	 * aal_puc_voq_drop_set(0, 3, cfg): cfg[0] is the physical VOQ index
+	 * and cfg[1] is 0. The last queue added by stock is queue 0, so the
+	 * resulting 0x80e0 state has low byte 0 and bit31 clear. Reproduce
+	 * that state; the register is the PUC VOQ drop selector. */
+	rtl_pon_update(pon->mac + 0x80e0, GENMASK(7, 0) | BIT(31), 0);
 	ret = rtl_puc_token_buckets(pon, 0);
 	if (ret)
 		goto unlock;

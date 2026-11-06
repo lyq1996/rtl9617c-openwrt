@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <linux/if_packet.h>
+#include <linux/netlink.h>
 #include <net/if.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -169,6 +170,74 @@ error:
 	return ignore;
 }
 
+struct oam_nl_frame {
+	uint16_t type;
+	uint16_t llid;
+	uint32_t length;
+	uint8_t data[];
+} __attribute__((packed));
+
+static int netlink_oam_socket(void)
+{
+	struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+	int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_USERSOCK);
+
+	if (fd < 0)
+		return -errno;
+	if (bind(fd, (struct sockaddr *)&local, sizeof(local))) {
+		int error = -errno;
+		close(fd);
+		return error;
+	}
+	return fd;
+}
+
+static int netlink_oam_send(int fd, unsigned int llid, const uint8_t *data, size_t length)
+{
+	struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
+	struct oam_nl_frame *frame;
+	struct nlmsghdr *header;
+	struct iovec iov;
+	struct msghdr message = {.msg_name = &kernel, .msg_namelen = sizeof(kernel)};
+	size_t padded = length < 60 ? 60 : length;
+	size_t total = NLMSG_HDRLEN + sizeof(*frame) + padded;
+	uint8_t *buffer;
+
+	if (fd < 0 || length > 1522)
+		return -EINVAL;
+	static unsigned int logged;
+	if (logged < 3) {
+		char dump[512];
+		size_t i, used = 0;
+
+		for (i = 0; i < length && used + 4 < sizeof(dump); i++)
+			used += snprintf(dump + used, sizeof(dump) - used, "%02x ", data[i]);
+		syslog(LOG_INFO, "OAM netlink tx llid=%u len=%zu data=%s", llid, length, dump);
+		logged++;
+	}
+	buffer = calloc(1, total);
+	if (!buffer)
+		return -ENOMEM;
+	header = (struct nlmsghdr *)buffer;
+	header->nlmsg_len = total;
+	frame = (struct oam_nl_frame *)NLMSG_DATA(header);
+	frame->type = 2;
+	frame->llid = llid;
+	frame->length = padded;
+	memcpy(frame->data, data, length);
+	iov.iov_base = buffer;
+	iov.iov_len = total;
+	message.msg_iov = &iov;
+	message.msg_iovlen = 1;
+	if (sendmsg(fd, &message, 0) != (ssize_t)total) {
+		int error = -errno;
+		free(buffer);
+		return error;
+	}
+	free(buffer);
+	return 0;
+}
+
 static void read_starttime(char output[32])
 {
 	char data[1024], *position, *token, *save = NULL;
@@ -204,13 +273,14 @@ static int publish_status(const char *path, const struct pon_oam_session *sessio
 		return -errno;
 	ret = fprintf(stream,
 		"{\"pid\":%ld,\"process_start\":\"%s\",\"updated_ms\":%llu,\"llid_index\":%u,"
-		"\"link_error\":%d,\"registered\":%s,\"generation\":%u,\"discovery_stable\":%s,"
+		"\"link_error\":%d,\"registered\":%s,\"have_peer\":%s,\"generation\":%u,\"discovery_stable\":%s,"
 		"\"extension_selected\":%s,\"loid_configured\":%s,\"auth_state\":\"%s\","
 		"\"auth_failure\":%u,\"auth_challenges\":%u,\"auth_results\":%u,\"auth_successes\":%u,"
 		"\"auth_failures\":%u,\"last_auth_result_ms\":%llu,\"rx_frames\":%u,\"tx_frames\":%u,"
 		"\"send_errors\":%u,\"receive_errors\":%u,\"management_error\":%d}\n",
 		(long)getpid(), starttime, (unsigned long long)monotonic_ms(), llid, link_error,
-		online ? "true" : "false", session->generation, session->local_echoed ? "true" : "false",
+		online ? "true" : "false", session->have_peer ? "true" : "false",
+		session->generation, session->local_echoed ? "true" : "false",
 		session->extension_selected ? "true" : "false", loid_configured ? "true" : "false",
 		auth[session->auth], session->auth_failure, session->auth_challenges, session->auth_results,
 		session->auth_successes, session->auth_failures, (unsigned long long)auth_result_ms,
@@ -239,7 +309,7 @@ int main(int argc, char **argv)
 	bool online = false, check_config = false;
 	bool session_valid = false;
 	bool was_holdover = false;
-	int fd, lock_fd, ret, option;
+	int fd, nl_fd, lock_fd, ret, option;
 	char state_path[512], lock_path[512], starttime[32] = {};
 	uint64_t next_information = 0, next_status = 0, auth_result_ms = 0;
 	uint64_t last_received = 0;
@@ -299,6 +369,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "OAM interface %s: %s\n", interface, strerror(-fd));
 		return 1;
 	}
+	nl_fd = netlink_oam_socket();
+	if (nl_fd < 0)
+		fprintf(stderr, "OAM netlink redirect: %s\n", strerror(-nl_fd));
+	/* Captured stock OAM frames use the PON base MAC, not the WAN/PPPoE
+	 * subinterface MAC or a fixed 00:13:25 endpoint. */
 	read_starttime(starttime);
 	pon_backend_bind(&identity, &backend);
 	signal(SIGTERM, stop);
@@ -337,8 +412,12 @@ int main(int argc, char **argv)
 		}
 		if (online && now >= next_information) {
 			size_t size = pon_oam_information(&session, &identity, output);
+			syslog(LOG_INFO, "OAM send size=%zu peer=%d", size, session.have_peer);
 
-			if (send(fd, output, size, 0) == (ssize_t)size)
+			int sent = nl_fd >= 0 ? netlink_oam_send(nl_fd, llid, output, size) : -1;
+
+			if (sent == 0 ||
+			    (nl_fd < 0 && send(fd, output, size, 0) == (ssize_t)size))
 				pon_oam_information_sent(&session, output);
 			else
 				send_errors++;
@@ -370,7 +449,13 @@ int main(int argc, char **argv)
 			}
 			if (!online)
 				continue;
+			if (size >= 18)
+				syslog(LOG_INFO, "OAM rx size=%zd code=%02x flags=%02x%02x",
+					size, input[17], input[15], input[16]);
 			ret = pon_oam_receive(&session, &identity, input, size, output);
+			if (input[17] == 0xfe)
+				syslog(LOG_INFO, "OAM ctc result=%d ext=%d auth=%u",
+					ret, session.extension_selected, session.auth);
 			if (ret < 0) {
 				receive_errors++;
 				continue;
@@ -380,7 +465,10 @@ int main(int argc, char **argv)
 			last_received = monotonic_ms();
 			session_valid = true;
 			if (ret > PON_OAM_HANDLED) {
-				if (send(fd, output, ret, 0) == ret)
+				int sent = nl_fd >= 0 ? netlink_oam_send(nl_fd, llid, output, ret) : -1;
+
+				if (sent == 0 ||
+				    (nl_fd < 0 && send(fd, output, ret, 0) == ret))
 					session.tx_frames++;
 				else
 					send_errors++;

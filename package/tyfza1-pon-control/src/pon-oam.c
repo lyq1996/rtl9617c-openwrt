@@ -5,6 +5,7 @@
  */
 #include <errno.h>
 #include <string.h>
+#include <syslog.h>
 #include "pon-oam.h"
 
 #define LOCAL_EVAL 0x0008
@@ -34,11 +35,15 @@ void pon_oam_reset(struct pon_oam_session *session)
 	session->have_sent = false;
 	session->local_echoed = false;
 	session->extension_selected = false;
+	/* The captured stock ONU does not advertise CTC OAM before the OLT
+	 * selects an extension. Keep IEEE discovery clean first. */
 	session->extension_advertised = false;
-	session->extension_version = 0;
+	session->extension_version = 0x30;
 	memset(session->key, 0, sizeof(session->key));
 	session->key_length = 0;
-	memset(session->extension_oui, 0, sizeof(session->extension_oui));
+	session->extension_oui[0] = 0x00;
+	session->extension_oui[1] = 0x0d;
+	session->extension_oui[2] = 0xb6;
 	session->peer_flags = 0;
 	session->auth = PON_AUTH_WAITING;
 	session->auth_failure = 0;
@@ -47,22 +52,34 @@ void pon_oam_reset(struct pon_oam_session *session)
 
 uint16_t pon_oam_flags(const struct pon_oam_session *session)
 {
-	uint16_t flags = session->have_peer ? session->local_echoed ? LOCAL_STABLE : LOCAL_EVAL : 0;
+	/* Captured stock discovery frames use 0x0030 once the peer is present
+	 * and 0x0032 when the local information has been echoed. They do not
+	 * advertise LOCAL_EVAL (0x08), which made the OLT keep discovery open. */
+	uint16_t flags = session->have_peer ? LOCAL_STABLE : 0;
 
 	if (session->peer_flags & LOCAL_STABLE)
 		flags |= REMOTE_STABLE;
 	else if (session->peer_flags & LOCAL_EVAL)
 		flags |= REMOTE_EVAL;
+	/* Captured stock ONU sends 0x0032 as soon as it has the OLT Local TLV;
+	 * it does not wait for the OLT to echo the ONU Local TLV. */
+	if (session->have_peer)
+		flags |= 0x0002;
 	return flags;
 }
 
 static void local_information(const struct pon_oam_session *session, uint8_t *local)
 {
-	/* OAM version1, revision0, active, unidirectional/variable-request capability. */
-	static const uint8_t information[14] = {1, 0, 0, 6, 0x14, 5, 0xee, 0, 0x0d, 0xb6, 0x4d, 0x15, 1, 0};
+	(void)session;
+	/* Stock PT1500 OAM Local Information TLV value, captured from a
+	 * registered reference unit. The TLV length field is 16 and includes
+	 * the two-byte type/length header, so only these 14 bytes are sent. */
+	static const uint8_t information[PON_OAM_INFO_VALUE_LEN] = {
+		0x01, 0x00, 0x01, 0x00, 0x14, 0x05, 0xee, 0x1c,
+		0xe5, 0x04, 0x54, 0x4d, 0x42, 0x42,
+	};
 
 	memcpy(local, information, sizeof(information));
-	set_be16(local + 1, session->generation);
 }
 
 static void ethernet_header(const struct pon_oam_session *session, const struct pon_oam_identity *identity,
@@ -76,7 +93,9 @@ static void ethernet_header(const struct pon_oam_session *session, const struct 
 	output[12] = 0x88;
 	output[13] = 9;
 	output[14] = 3;
-	set_be16(output + 15, pon_oam_flags(session));
+	/* CTC organization/auth responses use the stable flag set, matching
+	 * ponwrt and the OLT's own CTC PDUs, not the IEEE discovery 0x0032. */
+	set_be16(output + 15, code == 0xfe ? 0x0050 : pon_oam_flags(session));
 	output[17] = code;
 }
 
@@ -87,14 +106,15 @@ size_t pon_oam_information(struct pon_oam_session *session, const struct pon_oam
 
 	ethernet_header(session, identity, output, 0);
 	output[offset++] = 1;
-	output[offset++] = 16;
+	output[offset++] = PON_OAM_INFO_TLV_LEN;
 	local_information(session, output + offset);
-	offset += 14;
+	offset += PON_OAM_INFO_VALUE_LEN;
 	if (session->have_peer) {
+		syslog(LOG_INFO, "OAM info peer branch offset=%zu", offset);
 		output[offset++] = 2;
-		output[offset++] = 16;
-		memcpy(output + offset, session->peer_local, 14);
-		offset += 14;
+		output[offset++] = PON_OAM_INFO_TLV_LEN;
+		memcpy(output + offset, session->peer_local, PON_OAM_INFO_VALUE_LEN);
+		offset += PON_OAM_INFO_VALUE_LEN;
 	}
 	if (session->extension_advertised || session->extension_selected) {
 		output[offset++] = 0xfe;
@@ -115,7 +135,7 @@ size_t pon_oam_information(struct pon_oam_session *session, const struct pon_oam
 
 void pon_oam_information_sent(struct pon_oam_session *session, const uint8_t *frame)
 {
-	memcpy(session->last_local, frame + 20, 14);
+	memcpy(session->last_local, frame + 20, PON_OAM_INFO_VALUE_LEN);
 	session->have_sent = true;
 	session->tx_frames++;
 }
@@ -137,7 +157,7 @@ static int receive_information(struct pon_oam_session *session, const uint8_t *i
 		if (size < 2 || offset + size > length)
 			return -EMSGSIZE;
 		if (type == 1 || type == 2) {
-			if (size != 16 || (type == 1 && local) || (type == 2 && remote))
+			if (size != PON_OAM_INFO_TLV_LEN || (type == 1 && local) || (type == 2 && remote))
 				return -EPROTO;
 			if (type == 1)
 				local = input + offset + 2;
@@ -155,19 +175,20 @@ static int receive_information(struct pon_oam_session *session, const uint8_t *i
 	/* A missing/mismatched Remote echo ends the established discovery session,
 	 * even when the peer's Local TLV has not changed. Require a new revision
 	 * echo before accepting authentication for the next session. */
-	echoed = remote && session->have_sent && !memcmp(remote, session->last_local, 14);
-	/* An OLT can change only its revision after provisioning while still
-	 * advertising stable and echoing our current revision. That is an update
-	 * within discovery, not a new discovery/authentication session. */
+	echoed = remote && session->have_sent && !memcmp(remote, session->last_local, PON_OAM_INFO_VALUE_LEN);
+	/* OLTs may rewrite the vendor-specific tail of the Local TLV while the
+	 * discovery state stays stable.  Only the version/revision/state/config
+	 * fields define a new session; comparing the whole value made every such
+	 * update reset the OAM session before it could send Remote echo. */
 	revision_only = session->have_peer && echoed && (be16(input + 15) & LOCAL_STABLE) &&
-		local[0] == session->peer_local[0] && !memcmp(local + 3, session->peer_local + 3, 11);
-	if ((session->have_peer && memcmp(session->peer_local, local, 14) && !revision_only) ||
+		!memcmp(local, session->peer_local, 4);
+	if ((session->have_peer && memcmp(session->peer_local, local, 4) && !revision_only) ||
 	    (session->local_echoed && (!remote || !session->have_sent ||
-				     memcmp(remote, session->last_local, 14))))
+				     memcmp(remote, session->last_local, PON_OAM_INFO_VALUE_LEN))))
 		pon_oam_reset(session);
-	memcpy(session->peer_local, local, 14);
+	memcpy(session->peer_local, local, PON_OAM_INFO_VALUE_LEN);
 	session->have_peer = true;
-	session->local_echoed = remote && session->have_sent && !memcmp(remote, session->last_local, 14);
+	session->local_echoed = remote && session->have_sent && !memcmp(remote, session->last_local, PON_OAM_INFO_VALUE_LEN);
 	session->peer_flags = be16(input + 15);
 	if (extension && (extension[1] > 7 || session->local_echoed)) {
 		unsigned int version = 0;
@@ -179,6 +200,8 @@ static int receive_information(struct pon_oam_session *session, const uint8_t *i
 		if (extension[1] == 7)
 			version = extension[6];
 		if (version) {
+			syslog(LOG_INFO, "CTC info ext size=%u version=%u selected=%u echoed=%u",
+				extension[1], version, extension[1] == 7, session->local_echoed);
 			memcpy(session->extension_oui, extension + 2, 3);
 			session->extension_selected = extension[1] == 7;
 			session->extension_advertised = extension[1] > 7;
@@ -238,8 +261,8 @@ static int receive_auth(struct pon_oam_session *session, const struct pon_oam_id
 	output[21] = 5;
 	output[22] = 2;
 	if (auth_type == 1) {
-		if (!identity->loid_configured)
-			return -ENOENT;
+		/* Stock answers LOID+Password even when the fields are empty. The
+		 * OLT then proceeds with MAC authentication; a Nak stalls here. */
 		set_be16(output + 23, 37);
 		output[25] = 1;
 		identity_field(output + 26, 24, identity->loid, sizeof(identity->loid));
@@ -248,8 +271,8 @@ static int receive_auth(struct pon_oam_session *session, const struct pon_oam_id
 	}
 	set_be16(output + 23, 2);
 	output[25] = 2;
-	output[26] = 1; /* Request the LOID type supported by this ONU. */
-	return 60;
+	output[26] = 1;
+	return 27;
 }
 
 /* A zero width encodes 128 data bytes. Longer values repeat the descriptor,
@@ -307,6 +330,8 @@ static int receive_variables(const struct pon_oam_session *session,
 			return -EMSGSIZE;
 		request.branch = input[position];
 		request.leaf = be16(input + position + 1);
+		syslog(LOG_INFO, "CTC %s branch=%02x leaf=%04x",
+			set ? "set" : "get", request.branch, request.leaf);
 		if (request.branch == 0x36 || request.branch == 0x37) {
 			size_t width = request.branch == 0x36 ? 5 : 8;
 
@@ -347,8 +372,11 @@ static int receive_variables(const struct pon_oam_session *session,
 					position += 3;
 				}
 			}
-			if (identity->set_parameter)
+			if (identity->set_parameter) {
 				indication = identity->set_parameter(identity->backend_context, &request, value, size);
+				syslog(LOG_INFO, "CTC set branch=%02x leaf=%04x size=%zu indication=%02x",
+					request.branch, request.leaf, size, indication);
+			}
 		} else {
 			/* AlarmThreshold Get carries its two-byte alarm ID, not another
 			 * variable descriptor (stock eponoamd:0x417ba0). */
@@ -362,6 +390,13 @@ static int receive_variables(const struct pon_oam_session *session,
 			if (request.branch == 0xc7 && request.leaf == 1) {
 				data = onu;
 				size = session->extension_version == 0x30 ? sizeof(onu) : 38;
+			} else if (request.branch == 0xc7 && request.leaf == 3) {
+				/* Stock chipset descriptor: vendor 0x0479, RTL9607 family
+				 * 0x960701, CTC revision bytes 09/08, silicon revision 0. */
+				static const uint8_t chipset[8] = {0x04, 0x79, 0x96, 0x07, 0x01, 0x09, 0x08, 0x00};
+
+				data = chipset;
+				size = sizeof(chipset);
 			} else if (request.branch == 0xc7 && request.leaf == 2) {
 				/* FirmwareVer is three version octets; the software identity
 				 * string belongs to ONU SN (stock eponoamd:0x41e518). */
@@ -383,7 +418,13 @@ static int receive_variables(const struct pon_oam_session *session,
 		offset = result;
 		variables = true;
 	}
-	return variables ? (offset < 60 ? 60 : offset) : PON_OAM_IGNORED;
+	if (!variables)
+		return PON_OAM_IGNORED;
+	/* CTC GET/SET responses end with a zero terminator (ponwrt ctc.rs). */
+	if (offset >= PON_OAM_FRAME_MAX)
+		return -EMSGSIZE;
+	output[offset++] = 0;
+	return offset < 60 ? 60 : offset;
 }
 
 static int receive_churning(struct pon_oam_session *session, const struct pon_oam_identity *identity,
@@ -429,8 +470,8 @@ int pon_oam_receive(struct pon_oam_session *session, const struct pon_oam_identi
 	if (!ctc_oui(input + 18) ||
 	    (input[21] != 1 && input[21] != 3 && input[21] != 5 && input[21] != 9))
 		return PON_OAM_IGNORED;
-	if (!session->local_echoed)
-		return -EAGAIN;
+	/* OLT may issue CTC variable/auth requests while the IEEE discovery
+	 * session is still settling; responding keeps the CTC session alive. */
 	ethernet_header(session, identity, output, 0xfe);
 	memcpy(output + 18, input + 18, 3);
 	if (input[21] == 5)
