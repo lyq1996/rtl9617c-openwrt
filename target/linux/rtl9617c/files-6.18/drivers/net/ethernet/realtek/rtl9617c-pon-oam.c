@@ -195,8 +195,7 @@ static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev
 				    (puc_port << 27) | (queue << 8);
 		break;
 	case 5:
-		/* Exact __ca_ni_start_xmit() metadata layout: header_low is
-		 * zero, header_high carries queue/port/PON flag. */
+		/* Earlier interpretation: queue in header_high[10:8]. */
 		frame.header_low = 0;
 		frame.header_high = BIT(30) | (puc_port << 27) | (queue << 8);
 		break;
@@ -208,6 +207,18 @@ static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev
 		frame.header_low = 0;
 		frame.header_high = BIT(30) | BIT(29) |
 				    (puc_port << 27) | (queue << 8);
+		break;
+	case 8:
+		/* Correct __ca_ni_start_xmit() path: metadata byte 8 is
+		 * skb->queue_mapping and goes to header_low[2:0]. For ordinary
+		 * netdev traffic metadata bytes 5/6 are zero, so header_high is
+		 * only the PON flag. */
+		frame.header_low = queue;
+		frame.header_high = BIT(30);
+		break;
+	case 9:
+		frame.header_low = queue;
+		frame.header_high = 0;
 		break;
 	}
 
