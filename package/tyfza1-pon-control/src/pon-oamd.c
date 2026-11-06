@@ -312,8 +312,9 @@ int main(int argc, char **argv)
 	int fd, nl_fd, lock_fd, ret, option;
 	char state_path[512], lock_path[512], starttime[32] = {};
 	uint64_t next_information = 0, next_status = 0, auth_result_ms = 0;
-	uint64_t last_received = 0;
+	uint64_t next_sla = 0, last_received = 0;
 	uint64_t line_epoch = 0;
+	int last_sla_error = 0;
 	static const struct option options[] = {
 		{"interface", required_argument, NULL, 'i'},
 		{"llid-index", required_argument, NULL, 'n'},
@@ -404,6 +405,19 @@ int main(int argc, char **argv)
 			backend.epoch = epoch;
 			next_information = now;
 			syslog(LOG_INFO, "LLID%u MPCP registered=%u generation=%u", llid, online, session.generation);
+		}
+		if (online && !holdover && now >= next_sla) {
+			int sla = pon_backend_service_sla(&backend);
+
+			if (sla != last_sla_error) {
+				if (sla)
+					syslog(LOG_WARNING, "LLID%u default SLA failed: %s",
+						llid, strerror(-sla));
+				else
+					syslog(LOG_INFO, "LLID%u default SLA queues applied", llid);
+				last_sla_error = sla;
+			}
+			next_sla = now + 2000;
 		}
 		if (online && !holdover && session_valid && now - last_received >= 5000) {
 			pon_oam_reset(&session);
