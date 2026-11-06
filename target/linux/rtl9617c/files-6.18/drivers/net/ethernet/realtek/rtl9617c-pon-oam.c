@@ -194,6 +194,21 @@ static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev
 		frame.header_high = BIT(30) | 7 |
 				    (puc_port << 27) | (queue << 8);
 		break;
+	case 5:
+		/* Exact __ca_ni_start_xmit() metadata layout: header_low is
+		 * zero, header_high carries queue/port/PON flag. */
+		frame.header_low = 0;
+		frame.header_high = BIT(30) | (puc_port << 27) | (queue << 8);
+		break;
+	case 6:
+		frame.header_low = 0;
+		frame.header_high = (puc_port << 27) | (queue << 8);
+		break;
+	case 7:
+		frame.header_low = 0;
+		frame.header_high = BIT(30) | BIT(29) |
+				    (puc_port << 27) | (queue << 8);
+		break;
 	}
 
 	if (!rtl_pon_mode_is_epon(READ_ONCE(pon->mode)))
