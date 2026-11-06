@@ -188,24 +188,17 @@ static int transceiver_get(struct pon_backend *backend, uint8_t *value)
 
 static int capabilities_get(struct pon_backend *backend, uint16_t leaf, uint8_t *value)
 {
-	char path[544];
-	FILE *file;
-	unsigned int port, gigabit = 0, fast = 0, llids;
+	unsigned int port, gigabit = 0, fast = 0;
 	uint64_t gigabit_mask = 0, fast_mask = 0;
-	int fields, ret;
+	int ret;
 
+	(void)backend;
 	if (leaf == 0xc) {
-		snprintf(path, sizeof(path), "%s/llid_count", backend->device);
-		file = fopen(path, "r");
-		if (!file)
-			return -errno;
-		fields = fscanf(file, "%u", &llids);
-		fclose(file);
-		if (fields != 1)
-			return -EIO;
 		value[0] = 1; /* IPv6 aware. */
 		value[1] = 0; /* Transmitter control is local-only, not an OAM capability. */
-		value[2] = llids;
+		/* Capabilities-3 byte 2 carries the CTC authentication mode.
+		 * 0 is MAC authentication, as used by this Beijing Unicom line. */
+		value[2] = 0;
 		return 3;
 	}
 	for (port = 0; port < 4; port++) {
@@ -406,8 +399,14 @@ static uint8_t parameter_set(void *context, const struct pon_oam_request *reques
 			return 0x86;
 		return 0x80;
 	}
-	if (branch == 0xc7 && (leaf == 0x41 || leaf == 0x42 || leaf == 0x45))
-		return 0x80; /* Multicast VLAN rules are accepted by the HGU. */
+	if (branch == 0xc7 && (leaf == 0x41 || leaf == 0x42 || leaf == 0x43 || leaf == 0x45))
+		return 0x80; /* Multicast VLAN/switch rules are accepted by the HGU. */
+	if (branch == 0xc7 && (leaf == 0x12 || leaf == 0x13 || leaf == 0x16) && size == 1)
+		return 0x80; /* Ethernet pause / policer / downstream rate limit. */
+	if (branch == 0xc7 && leaf == 0xa4 && size == 4)
+		return 0x80; /* MAC aging time. */
+	if (branch == 0x09 && (leaf == 0x05 || leaf == 0x0c) && size == 4)
+		return 0x80; /* PHY / auto-negotiation admin control. */
 	if (branch == 0xc9 && leaf == 0x48)
 		return size == 4 ? 0x80 : 0x86; /* acFastLeaveAdminControl. */
 	if (branch != 7 || leaf != 0x13a)

@@ -23,6 +23,10 @@ module_param_named(data_port, rtl_data_port, uint, 0644);
 static unsigned int rtl_data_queue = 0;
 module_param_named(data_queue, rtl_data_queue, uint, 0644);
 
+/* 0: legacy prototype layout, 1: stock EPON data header, 2/3: variants. */
+static unsigned int rtl_data_hdr_mode;
+module_param_named(data_hdr_mode, rtl_data_hdr_mode, uint, 0644);
+
 struct rtl_oam_nl_frame {
 	u16 type;
 	u16 llid;
@@ -158,14 +162,39 @@ static netdev_tx_t rtl_data_transmit(struct sk_buff *skb, struct net_device *dev
 	struct rtl_oam_port *port = netdev_priv(dev);
 	struct rtl9617c_pon *pon = port->pon;
 	unsigned int queues = READ_ONCE(pon->llid_count) > 16 ? 4 : 8;
+	unsigned int queue = rtl_data_queue & (queues - 1);
+	unsigned int puc_port = rtl_data_port & 7;
 	struct rtl9617c_ni_frame frame = {
 		.header_high = BIT(30), /* Business packets use the native deep queue. */
 		/* Stock dal_rtl8277c_ponmac_queue_add() registers the business
 		 * queues on PUC port 0 (queueId 0..7), not on port 7. */
-		.header_low = (rtl_data_queue & (queues - 1)) |
+		.header_low = queue |
 			      ((rtl_data_port + port->llid) << 3) |
 			      (16 << 9) | BIT(29),
 	};
+
+	switch (rtl_data_hdr_mode) {
+	case 1:
+		/* __ca_ni_start_xmit(): low=(llid<<3)|7; queue in high[10:8],
+		 * PUC port in high[29:27], PON flag in high[30]. */
+		frame.header_low = (port->llid << 3) | 7;
+		frame.header_high = BIT(30) | (puc_port << 27) | (queue << 8);
+		break;
+	case 2:
+		frame.header_low = (port->llid << 3) | 7;
+		frame.header_high = (puc_port << 27) | (queue << 8);
+		break;
+	case 3:
+		frame.header_low = (port->llid << 3) | 7;
+		frame.header_high = BIT(30) | BIT(29) |
+				    (puc_port << 27) | (queue << 8);
+		break;
+	case 4:
+		frame.header_low = (port->llid << 3) | 7;
+		frame.header_high = BIT(30) | 7 |
+				    (puc_port << 27) | (queue << 8);
+		break;
+	}
 
 	if (!rtl_pon_mode_is_epon(READ_ONCE(pon->mode)))
 		return rtl_pon_itu_data_transmit(pon, skb, dev);
