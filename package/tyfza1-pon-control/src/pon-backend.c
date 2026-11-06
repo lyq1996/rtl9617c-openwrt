@@ -289,33 +289,6 @@ static int sla_set(struct pon_backend *backend, const uint8_t *value, size_t siz
 	return ret;
 }
 
-int pon_backend_service_sla(struct pon_backend *backend)
-{
-	uint8_t value[8 + 10 * 6];
-	unsigned int queue;
-	int ret;
-
-	if (backend->sla_epoch == backend->epoch)
-		return 0;
-	memset(value, 0, sizeof(value));
-	value[0] = 1; /* Queue table present. */
-	value[1] = 1; /* Enable WRR weights. */
-	value[7] = 6; /* Stock EPON configures queues 0..5. */
-	for (queue = 0; queue < value[7]; queue++) {
-		uint8_t *entry = value + 8 + queue * 10;
-
-		/* CIR=0, PIR=max, weight=1: enough to open the PUC/VOQ data
-		 * path before the OLT supplies a Service SLA rule. */
-		entry[7] = 0xff;
-		entry[8] = 0xff;
-		entry[9] = 1;
-	}
-	ret = sla_set(backend, value, sizeof(value));
-	if (!ret)
-		backend->sla_epoch = backend->epoch;
-	return ret;
-}
-
 static int holdover_get(struct pon_backend *backend, uint8_t *value)
 {
 	uint8_t raw[4];
@@ -510,7 +483,6 @@ int pon_backend_init(struct pon_backend *backend, const char *mpcp_path)
 		return -ENAMETOOLONG;
 	memcpy(backend->device, mpcp_path, size);
 	backend->device[size] = 0;
-	backend->sla_epoch = UINT64_MAX;
 	return 0;
 }
 

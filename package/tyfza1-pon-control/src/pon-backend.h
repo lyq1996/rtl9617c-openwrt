@@ -6,10 +6,8 @@ struct pon_backend {
 	char device[512];
 	unsigned int llid;
 	uint64_t epoch;
-	uint64_t sla_epoch;
 	int management_error;
 };
 int pon_backend_init(struct pon_backend *backend, const char *mpcp_path);
 void pon_backend_bind(struct pon_oam_identity *identity, struct pon_backend *backend);
-int pon_backend_service_sla(struct pon_backend *backend);
 #endif
