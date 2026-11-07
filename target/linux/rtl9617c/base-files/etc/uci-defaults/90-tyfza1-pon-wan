@@ -1,24 +1,79 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
+# Provision an EPON WAN in the stock PT1500 layout: PPPoE on VLAN 3961 with
+# the stock VLAN interface MAC (PON base MAC + 3). Credentials stay empty.
 [ -e /sys/class/net/pon0/llid_index ] || exit 0
-# Bind an unconfigured WAN to PON; preserve explicitly configured devices.
-case "$(uci -q get network.wan.device || uci -q get network.wan.ifname)" in
-	'')
+
+wan_vlan=$(uci -q get pon.pon.wan_vlan)
+[ -n "$wan_vlan" ] || wan_vlan=3961
+vlan_device="pon0.$wan_vlan"
+
+# Existing WAN and VLAN settings win; this only fills a fresh config.
+wan_device=$(uci -q get network.wan.device || uci -q get network.wan.ifname)
+case "$wan_device" in
+	''|pon0|"pon0.$wan_vlan")
 		uci set network.wan='interface'
-		uci set network.wan.device='pon0'
-		[ -n "$(uci -q get network.wan.proto)" ] || uci set network.wan.proto='dhcp'
+		uci set network.wan.device="$vlan_device"
+		uci set network.wan.proto='pppoe'
+		uci set network.wan.mtu='1492'
+		uci set network.wan.ipv6='1'
+		uci set network.wan.norelease='1'
+		[ -n "$(uci -q get network.wan.username)" ] || \
+			uci set network.wan.username=''
+		[ -n "$(uci -q get network.wan.password)" ] || \
+			uci set network.wan.password=''
 		;;
 esac
+
+pon_mac=$(uci -q get pon.pon.onu_mac)
+[ -n "$pon_mac" ] || pon_mac=$(uci -q -c /var/run/tyfza1-factory \
+	get pon_factory.pon.onu_mac)
+[ -n "$pon_mac" ] || pon_mac=$(cat \
+	/sys/bus/platform/devices/4f5500000.pon/onu_mac 2>/dev/null)
+[ -n "$pon_mac" ] || pon_mac=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+
+vlan_mac=
+if [ -n "$pon_mac" ]; then
+	set -- $(echo "$pon_mac" | tr -d ':' | sed 's/../& /g')
+	if [ $# -eq 6 ]; then
+		vlan_mac=$(printf '%02x%02x%02x%02x%02x%02x\n' "$1" "$2" "$3" "$4" "$5" \
+			$((0x$6 + 3)) | sed 's/../&:/g; s/:$//')
+	fi
+fi
+
+index=0
+found=
+while uci -q get "network.@device[$index]" >/dev/null; do
+	if [ "$(uci -q get network.@device[$index].name)" = "$vlan_device" ]; then
+		found=1
+		break
+	fi
+	index=$((index + 1))
+done
+if [ -z "$found" ]; then
+	uci add network device >/dev/null
+	uci set "network.@device[$index].type=8021q"
+	uci set "network.@device[$index].ifname=pon0"
+	uci set "network.@device[$index].vid=$wan_vlan"
+	uci set "network.@device[$index].name=$vlan_device"
+fi
+if [ -n "$vlan_mac" ] && [ -z "$(uci -q get network.@device[$index].macaddr)" ]; then
+	uci set "network.@device[$index].macaddr=$vlan_mac"
+fi
+
+uci set pon.pon.wan_vlan="$wan_vlan"
+uci set pon.pon.offload=0
+uci commit pon
+uci commit network
+
 case "$(uci -q get network.wan6.device || uci -q get network.wan6.ifname)" in
-	''|pon0)
+	''|pon0|"pon0.$wan_vlan")
 		uci set network.wan6='interface'
 		uci set network.wan6.device='@wan'
 		uci set network.wan6.proto='dhcpv6'
 		;;
 esac
-# WAN6 follows the native PPP device; do not also create ppp.sh's auto WAN_6.
-if [ "$(uci -q get network.wan6.device)" = @wan ] &&
-   [ -z "$(uci -q get network.wan.ipv6)" ]; then
+if [ "$(uci -q get network.wan6.device)" = '@wan' ]; then
 	uci set network.wan.ipv6='1'
 fi
 uci commit network

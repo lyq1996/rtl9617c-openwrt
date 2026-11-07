@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
+# Keep PON FE offload opt-in until the EPON business path is proven.
+[ "$(uci -q get pon.pon.offload)" = '1' ] || exit 0
 device=/sys/bus/platform/devices/4f5500000.pon/fe
 [ -r "$device" ] && grep -q '^available=1' "$device" || exit 0
-uci -q get 'firewall.@defaults[0].flow_offloading_hw' >/dev/null && exit 0
 uci set 'firewall.@defaults[0].flow_offloading=1'
 uci set 'firewall.@defaults[0].flow_offloading_hw=1'
 uci commit firewall
