@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Provision an EPON WAN in the stock PT1500 layout: PPPoE on VLAN 3961 with
 # the stock VLAN interface MAC (PON base MAC + 3). Credentials stay empty.
-[ -e /sys/class/net/pon0/llid_index ] || exit 0
+# Do not require pon0 here: uci-defaults runs before the PON service.
 
 wan_vlan=$(uci -q get pon.pon.wan_vlan)
 [ -n "$wan_vlan" ] || wan_vlan=3961
@@ -63,6 +63,8 @@ fi
 
 uci set pon.pon.wan_vlan="$wan_vlan"
 uci set pon.pon.offload=0
+uci set pon.pon.loid='SCDXAT2020'
+[ -n "$(uci -q get pon.pon.loid_password)" ] || uci set pon.pon.loid_password=''
 uci commit pon
 uci commit network
 
