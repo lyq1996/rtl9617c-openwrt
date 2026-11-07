@@ -59,6 +59,45 @@ static inline int rtl_itu_puc_schedule(const struct rtl_dq_io *io,
 	return io->indirect(io->context, 0x8060, 0xc0000000U | index);
 }
 
+static inline int rtl_itu_puc_field_update(const struct rtl_dq_io *io,
+		unsigned int access, unsigned int data_base, unsigned int words,
+		unsigned int index, unsigned int bit, unsigned int width,
+		unsigned int value)
+{
+	unsigned int data[5], word = bit / 32, shift = bit % 32;
+	unsigned int mask = (1U << width) - 1;
+	unsigned int i;
+
+	for (i = 0; i < words; i++)
+		data[i] = io->read(io->context, data_base - i * 4);
+	value &= mask;
+	data[word] = (data[word] & ~(mask << shift)) | (value << shift);
+	if (shift + width > 32)
+		data[word + 1] = (data[word + 1] &
+			~(mask >> (32 - shift))) | (value >> (32 - shift));
+	for (i = 0; i < words; i++)
+		io->write(io->context, data_base - i * 4, data[i]);
+	return io->indirect(io->context, access, 0xc0000000U | index);
+}
+
+/* Match dal_rtl8277c_ponmac_queue_add(): update one queue's VOQ map and
+ * VSTBL credit without stopping or rewriting the other seven queues. */
+static inline int rtl_itu_puc_queue_map(const struct rtl_dq_io *io,
+		unsigned int index, unsigned int queue, unsigned int voq)
+{
+	return rtl_itu_puc_field_update(io, 0x8000, 0x8014, 5, index,
+		queue * 9, 9, (voq & 0xff) | (1U << 8));
+}
+
+static inline int rtl_itu_puc_queue_schedule(const struct rtl_dq_io *io,
+		unsigned int index, unsigned int queue, unsigned int weight)
+{
+	unsigned int shift = 7 + (io->read(io->context, 0x8048) & 3);
+
+	return rtl_itu_puc_field_update(io, 0x8060, 0x8074, 5, index,
+		queue * 20, 20, weight << shift);
+}
+
 static inline void rtl_gpon_puc_profile(const struct rtl_dq_io *io)
 {
 	unsigned int mask = 0xfb01193fU;

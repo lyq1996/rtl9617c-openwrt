@@ -89,46 +89,35 @@ static inline int rtl_epon_sla_flush(const struct rtl_dq_io *io, unsigned int po
 static inline int rtl_epon_sla_apply(const struct rtl_dq_io *io, unsigned int port,
 	const unsigned char *data)
 {
-	unsigned char weights[8] = {0};
-	unsigned int queues = data[0] ? data[7] : 8;
+	unsigned int queues = data[0] ? data[7] : 0;
 	unsigned int valid_reg = 0x81bc - port / 4 * 4;
 	unsigned int shift = (port % 4) * 8, row;
 	int ret;
 
-	/* Stop this LLID's queues while replacing the policy. A failed table
-	 * operation must not leave a partially applied policy advertised live. */
-	ret = rtl_itu_puc_tcont_weights(io, port, 0, weights);
-	if (ret)
-		return ret;
-	io->write(io->context, valid_reg, io->read(io->context, valid_reg) & ~(255U << shift));
-	for (row = 0; row < 8; row++) {
-		unsigned int cir = 0, pir = 0x1f3ffffU;
+	if (!queues)
+		return 0;
+	for (row = 0; row < queues; row++) {
+		const unsigned char *queue = data + 8 + row * 10;
+		unsigned int cir = rtl_epon_sla_u16(queue + 5) * 8;
+		unsigned int pir = rtl_epon_sla_u16(queue + 7) * 8;
+		unsigned int weight = data[1] ? queue[9] : 1;
 
-		ret = rtl_epon_sla_flush(io, port, port * 8 + row);
-		if (ret)
-			return ret;
-		if (data[0] && row < queues) {
-			const unsigned char *queue = data + 8 + row * 10;
-
-			cir = rtl_epon_sla_u16(queue + 5) * 8;
-			pir = rtl_epon_sla_u16(queue + 7) * 8;
-			weights[row] = data[1] ? queue[9] : 0;
-		}
+		/* Keep this identical to stock dal_rtl8277c_ponmac_queue_add():
+		 * program only the requested queue, never disable the TCONT or
+		 * rewrite the OAM queue. */
 		ret = rtl_epon_sla_bucket(io, port * 8 + row, pir, 1);
 		if (!ret)
 			ret = rtl_epon_sla_bucket(io, port * 8 + row, cir, 0);
+		if (!ret)
+			ret = rtl_itu_puc_queue_map(io, port, row, port * 8 + row);
+		if (!ret)
+			ret = rtl_itu_puc_queue_schedule(io, port, row, weight);
 		if (ret)
 			return ret;
 	}
-	/* Stock AAL couples the first two WRR weights even when queue1 is off. */
-	if (queues == 1)
-		weights[1] = weights[0];
-	ret = rtl_itu_puc_schedule(io, port, 0, weights);
-	if (ret)
-		return ret;
-	io->write(io->context, valid_reg, (io->read(io->context, valid_reg) & ~(255U << shift)) |
+	io->write(io->context, valid_reg, io->read(io->context, valid_reg) |
 		((1U << queues) - 1) << shift);
-	return rtl_itu_puc_tcont_weights(io, port, (1U << queues) - 1, weights);
+	return 0;
 }
 
 #endif

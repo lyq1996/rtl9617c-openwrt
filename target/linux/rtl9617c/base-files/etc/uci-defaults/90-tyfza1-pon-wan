@@ -36,8 +36,9 @@ vlan_mac=
 if [ -n "$pon_mac" ]; then
 	set -- $(echo "$pon_mac" | tr -d ':' | sed 's/../& /g')
 	if [ $# -eq 6 ]; then
-		vlan_mac=$(printf '%02x%02x%02x%02x%02x%02x\n' "$1" "$2" "$3" "$4" "$5" \
-			$((0x$6 + 3)) | sed 's/../&:/g; s/:$//')
+		vlan_mac=$(printf '%02x:%02x:%02x:%02x:%02x:%02x\n' \
+			$((0x$1)) $((0x$2)) $((0x$3)) $((0x$4)) $((0x$5)) \
+			$((0x$6 + 3)))
 	fi
 fi
 
@@ -63,8 +64,8 @@ fi
 
 uci set pon.pon.wan_vlan="$wan_vlan"
 uci set pon.pon.offload=0
-uci set pon.pon.loid='SCDXAT2020'
-[ -n "$(uci -q get pon.pon.loid_password)" ] || uci set pon.pon.loid_password=''
+uci delete pon.pon.loid >/dev/null 2>&1
+uci delete pon.pon.loid_password >/dev/null 2>&1
 uci commit pon
 uci commit network
 
