@@ -1,0 +1,27 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] mtd: spi-nand: add the XT26G02C device
+
+The PT1500 board carries a 256 MiB XTX XT26G02C. It shares the OOB
+layout and the ECC status readback of the other XT26 parts.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+---
+--- a/drivers/mtd/nand/spi/xtx.c
++++ b/drivers/mtd/nand/spi/xtx.c
+@@ -209,6 +209,16 @@
+ 		     0,
+ 		     SPINAND_ECCINFO(&xt26xxxd_ooblayout,
+ 				     xt26xxxd_ecc_get_status)),
++	SPINAND_INFO("XT26G02C",
++		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ADDR, 0x12),
++		     NAND_MEMORG(1, 2048, 128, 64, 2048, 40, 1, 1, 1),
++		     NAND_ECCREQ(8, 512),
++		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
++					      &write_cache_variants,
++					      &update_cache_variants),
++		     0,
++		     SPINAND_ECCINFO(&xt26xxxd_ooblayout,
++				     xt26xxxd_ecc_get_status)),
+ 	SPINAND_INFO("XT26G12D",
+ 		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ADDR, 0x35),
+ 		     NAND_MEMORG(1, 2048, 128, 64, 2048, 40, 1, 1, 1),
