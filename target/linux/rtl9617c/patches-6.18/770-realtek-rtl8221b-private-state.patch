@@ -1,0 +1,26 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] net: phy: realtek: attach private state in rtl822x_probe
+
+Give the RTL822x probe path a private-state hook so board code can
+carry per-port calibration without touching the generic driver flow.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+---
+--- a/drivers/net/phy/realtek/realtek_main.c
++++ b/drivers/net/phy/realtek/realtek_main.c
+@@ -3970,6 +3970,7 @@
+ 	}, {
+ 		.match_phy_device = rtl8221b_match_phy_device,
+ 		.name		= "RTL8226B_RTL8221B 2.5Gbps PHY",
++		.probe		= rtl822x_probe,
+ 		.soft_reset	= genphy_soft_reset,
+ 		.get_features	= rtl822x_get_features,
+ 		.config_aneg	= rtl822x_config_aneg,
+@@ -4001,6 +4002,7 @@
+ 	}, {
+ 		PHY_ID_MATCH_EXACT(0x001cc848),
+ 		.name		= "RTL8226B-CG_RTL8221B-CG 2.5Gbps PHY",
++		.probe		= rtl822x_probe,
+ 		.soft_reset	= genphy_soft_reset,
+ 		.get_features	= rtl822x_get_features,
+ 		.config_aneg	= rtl822x_config_aneg,
