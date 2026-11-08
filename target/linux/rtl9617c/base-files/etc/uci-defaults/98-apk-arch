@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+[ -s /etc/apk/keys/openwrt-snapshots.pem ] || exit 1
+printf 'aarch64_cortex-a53\n' > /etc/apk/arch

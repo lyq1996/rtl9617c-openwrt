@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+ucidef_set_led_netdev "lan2" "LAN2" "LED_EPHY1" "lan2"
+ucidef_set_led_netdev "lan3" "LAN3" "LED_EPHY2" "lan3"
+ucidef_set_led_netdev "lan4" "LAN4" "LED_EPHY3" "lan4"
+
+board_config_flush

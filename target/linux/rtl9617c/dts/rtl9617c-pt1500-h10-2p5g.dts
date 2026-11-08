@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+#include "rtl9617c.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+
+/ {
+	model = "Youhua PT1500-H10 2.5G";
+	compatible = "youhua,pt1500-h10-2p5g", "realtek,rtl9617c";
+
+	aliases {
+		serial0 = &uart0;
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_power;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootargs = "earlycon console=ttyS0,115200n8 loglevel=7 clk_ignore_unused maxcpus=4";
+		rootdisk = <&ubi_rootdisk>;
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0 0 0 0x20000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		voip-vector@0 {
+			reg = <0 0 0 0x1000>;
+			no-map;
+		};
+		voip@2000000 {
+			reg = <0 0x02000000 0 0x00300000>;
+			no-map;
+		};
+		voip-ipc@2300000 {
+			reg = <0 0x02300000 0 0x00100000>;
+			no-map;
+		};
+		ddr-noncache@9000000 {
+			reg = <0 0x09000000 0 0x01a50000>;
+		};
+		ddr-cache@bc48000 {
+			reg = <0 0x0bc48000 0 0x10000>;
+		};
+		tz-smc@eeff000 {
+			reg = <0 0x0eeff000 0 0x1000>;
+			no-map;
+		};
+		tz@ffc0000 {
+			reg = <0 0x0ffc0000 0 0x40000>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		internet {
+			label = "LED_PPP_G";
+			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+		los {
+			label = "LED_LOS";
+			gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+		};
+		pon {
+			label = "LED_PON";
+			gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+		};
+		led_power: power {
+			label = "LED_PWR_G";
+			gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+		phone {
+			label = "LED_FXS";
+			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+		};
+
+		lan0 {
+			label = "LED_EPHY0";
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		};
+		lan1 {
+			label = "LED_EPHY1";
+			gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
+		};
+		lan2 {
+			label = "LED_EPHY2";
+			gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		};
+		lan3 {
+			label = "LED_EPHY3";
+			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	gpio-keys-polled {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&watchdog {
+	reset-on-timeout;
+	delay-reset = <134>;
+	status = "okay";
+};
+
+&qspi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-tx-bus-width = <1>;
+		spi-rx-bus-width = <1>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot";
+				reg = <0x0 0x200000>;
+				read-only;
+			};
+			partition@280000 {
+				label = "env";
+				reg = <0x280000 0x40000>;
+			};
+			partition@2c0000 {
+				label = "env2";
+				reg = <0x2c0000 0x40000>;
+			};
+			partition@300000 {
+				label = "static_conf";
+				reg = <0x300000 0x40000>;
+			};
+			ubi_partition: partition@340000 {
+				label = "ubi_device";
+				reg = <0x340000 0xf5c0000>;
+				compatible = "linux,ubi";
+
+				volumes {
+					ubi_rootdisk: ubi-volume-fit {
+						volname = "fit";
+					};
+					ubi_factory: ubi-volume-factory {
+						volname = "factory";
+
+						nvmem-layout {
+							compatible = "fixed-layout";
+
+							#address-cells = <1>;
+							#size-cells = <1>;
+
+							base_mac: mac-address@1000 {
+								compatible = "mac-base";
+								reg = <0x1000 0x6>;
+								#nvmem-cell-cells = <1>;
+							};
+
+							epon_mac: mac-address@1010 {
+								compatible = "mac-base";
+								reg = <0x1010 0x6>;
+								#nvmem-cell-cells = <1>;
+							};
+
+							pon_sn: pon-serial@1020 {
+								reg = <0x1020 0x10>;
+							};
+
+							device_sn: device-serial@1030 {
+								reg = <0x1030 0x20>;
+							};
+						};
+					};
+				};
+			};
+		};
+	};
+};
+
+&mdio {
+	status = "okay";
+
+	phy1: ethernet-phy@1 {
+		reg = <1>;
+	};
+	phy2: ethernet-phy@2 {
+		reg = <2>;
+	};
+	phy3: ethernet-phy@3 {
+		reg = <3>;
+	};
+	phy4: ethernet-phy@4 {
+		reg = <4>;
+	};
+
+	phy_2p5g: ethernet-phy@6 {
+		reg = <6>;
+
+		realtek,hsgmii;
+		realtek,no-vendor-finish;
+
+		realtek,oem-sds-option;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	bosa0: optical-front-end@51 {
+		compatible = "realtek,rtl9617c-bosa";
+		reg = <0x51>;
+	};
+};
+
+&{/soc} {
+	sgmii_lane: sgmii@f43200c4 {
+		compatible = "realtek,rtl9617c-sgmii";
+		reg = <0 0xf43200c4 0 0x20>, <0 0xf43200a0 0 4>,
+		      <0 0xf432036c 0 4>, <4 0xf433b000 0 0x1000>,
+		      <0 0xf4600000 0 0x1000>;
+		reg-names = "control", "reset", "power", "analog", "serdes";
+		#phy-cells = <0>;
+	};
+
+	gpio0: gpio@4f43292c0 {
+		compatible = "realtek,rtl9617c-gpio";
+		reg = <4 0xf43292c0 0 0xb4>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-ranges = <&pinctrl 0 0 160>;
+	};
+
+	ne_irq: interrupt-controller@f4320164 {
+		compatible = "realtek,rtl9617c-per-ictl", "cortina,per-ictl";
+		reg = <0 0xf4320164 0 0x10>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#address-cells = <0>;
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_SPI 1 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	ni0: ethernet@4f4300000 {
+		compatible = "realtek,rtl9617c-ni";
+		nvmem-cells = <&base_mac 0>;
+		nvmem-cell-names = "mac-address";
+		reg = <4 0xf4300000 0 0x10000>, <0 0xf4500000 0 0x2000>,
+		      <4 0xf7001000 0 0x1000>, <4 0xf432d000 0 0x1000>,
+		      <4 0xf4320098 0 4>, <4 0xf432f000 0 0x1000>,
+		      <4 0xf550d000 0 0x1000>;
+		reg-names = "ni", "xram", "dma-lso", "qm-axi-reorder", "block-reset",
+			    "l3fe-axi-reorder", "p6-serdes";
+
+		realtek,dma-tx;
+		realtek,qm-rx;
+
+		realtek,port = <0>;
+		phy-handle = <&phy1>;
+
+		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4>;
+
+		realtek,p6-phy = <&phy_2p5g>;
+		phys = <&sgmii_lane>;
+		phy-names = "sgmii";
+		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	pon@4f5500000 {
+		compatible = "realtek,rtl9617c-pon";
+		nvmem-cells = <&epon_mac 0>, <&pon_sn 0>;
+		nvmem-cell-names = "mac-address", "pon-serial";
+		realtek,network-engine = <&ni0>;
+		realtek,optical-front-end = <&bosa0>;
+		tx-disable-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		reg = <4 0xf5500000 0 0xc000>, <4 0xf4320094 0 4>,
+		      <4 0xf4320074 0 4>, <4 0xf432022c 0 4>,
+		      <4 0xf4320080 0 8>, <4 0xf4320090 0 4>, <4 0xf4320180 0 8>, <4 0xf432007c 0 4>,
+		      <4 0xf4329440 0 0x10>;
+		reg-names = "mac", "control", "epon-control", "serdes-init", "optical-control", "optical-status", "top-irq", "gpon-control", "dying-gasp";
+		interrupts-extended = <&ne_irq 5>, <&per_ictl 24>;
+		interrupt-names = "pon", "dying-gasp";
+		realtek,burst-polarity = <0>;
+		realtek,los-invert = <0>;
+		realtek,uni-ports = /bits/ 8 <3 2 1 0>;
+	};
+
+};
