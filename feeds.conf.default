@@ -3,6 +3,7 @@ src-git luci https://git.openwrt.org/project/luci.git
 src-git routing https://git.openwrt.org/feed/routing.git
 src-git telephony https://git.openwrt.org/feed/telephony.git
 src-git video https://github.com/openwrt/video.git
+src-git kenzok8 https://github.com/kenzok8/openwrt-packages.git^1c660988248eccc33681ae635721a7a6eb9289bf
 #src-git targets https://github.com/openwrt/targets.git
 #src-git oldpackages http://git.openwrt.org/packages.git
 #src-link custom /usr/src/openwrt/custom-feed
