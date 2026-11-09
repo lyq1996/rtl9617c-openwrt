@@ -1,0 +1,42 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+START=20
+USE_PROCD=1
+
+POLICY=/sys/devices/system/cpu/cpufreq/policy0
+
+apply() {
+	local frequency available current
+
+	config_load system
+	config_get frequency cpu frequency
+	[ -n "$frequency" ] || return 0
+
+	read -r available < "$POLICY/scaling_available_frequencies" || return 1
+	case " $available " in
+		*" $frequency "*) ;;
+		*) logger -t rtl9617c-cpu "unsupported frequency: $frequency kHz"
+		   return 1 ;;
+	esac
+
+	printf 'userspace\n' > "$POLICY/scaling_governor" || return 1
+	printf '%s\n' "$frequency" > "$POLICY/scaling_setspeed" || return 1
+
+	read -r current < "$POLICY/cpuinfo_cur_freq" || return 1
+	[ "$current" = "$frequency" ] || {
+		logger -t rtl9617c-cpu "requested $frequency kHz, running $current kHz"
+		return 1
+	}
+}
+
+start_service() {
+	apply
+}
+
+reload_service() {
+	apply
+}
+
+service_triggers() {
+	procd_add_reload_trigger system
+}

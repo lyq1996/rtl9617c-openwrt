@@ -1,0 +1,20 @@
+{
+  "luci-rtl9617c-cpu": {
+    "description": "Read SoC temperature and configure the shared CPU frequency",
+    "read": {
+      "ubus": {
+        "luci.rtl9617c-system": [
+          "status"
+        ]
+      },
+      "uci": [
+        "system"
+      ]
+    },
+    "write": {
+      "uci": [
+        "system"
+      ]
+    }
+  }
+}

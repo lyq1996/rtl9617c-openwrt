@@ -1,0 +1,12 @@
+RTL9617C LuCI feed patches
+========================
+
+These patches modify the LuCI feed, not this package. Apply them after
+"scripts/feeds update luci" and before building:
+
+  ../rtl9617c-feed/apply-luci-patches.sh
+
+- 100-rtl9617c-system-status: show the SoC temperature on the status page via
+  the luci.rtl9617c-system ubus object and grant the matching ACL.
+- 101-rtl9617c-resource-version: expose base_url and resource_version to the
+  header template so updated static resources are not served from cache.

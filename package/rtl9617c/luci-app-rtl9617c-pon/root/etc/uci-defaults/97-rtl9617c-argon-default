@@ -1,0 +1,8 @@
+#!/bin/sh
+# Select Argon 3.1 as the default LuCI theme on this image.
+uci -q get luci.themes.Argon >/dev/null 2>&1 || \
+	uci set luci.themes.Argon='/luci-static/argon'
+uci -q get luci.main.mediaurlbase | grep -q '/luci-static/argon' || \
+	uci set luci.main.mediaurlbase='/luci-static/argon'
+uci commit luci
+exit 0
