@@ -1,0 +1,7 @@
+config pon 'pon'
+	option enabled '1'
+	option llid_count '1'
+	option mode 'xgpon'
+	option equipment_id 'PT1500'
+	option onu_mac ''
+	option serial_number ''
