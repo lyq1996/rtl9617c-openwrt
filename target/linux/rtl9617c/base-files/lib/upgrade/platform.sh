@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 REQUIRE_IMAGE_METADATA=1
-RAMFS_COPY_BIN='fw_printenv fw_setenv'
+RAMFS_COPY_BIN='fw_printenv fw_setenv fitblk'
 
 platform_check_image() {
 	local board="$(board_name)"
@@ -17,8 +17,5 @@ platform_check_image() {
 }
 
 platform_do_upgrade() {
-	umount -l /rom 2>/dev/null
-	CI_KERNPART=fit
-	CI_UBIPART=ubi_device
-	nand_do_upgrade "$1"
+	fit_do_upgrade "$1"
 }
