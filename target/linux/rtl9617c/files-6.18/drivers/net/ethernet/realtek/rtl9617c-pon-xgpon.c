@@ -307,11 +307,9 @@ static int rtl_xgpon_mac_restart_locked(struct rtl9617c_pon *pon, bool phy)
 	pon->puc_configured = false;
 	pon->pdc_configured = false;
 	stage = "datapath initialization";
-	mutex_unlock(&pon->lock);
-	ret = rtl_pon_pdc_configure_locked(pon);
+	ret = __rtl_pon_pdc_configure(pon);
 	if (!ret)
-		ret = rtl_pon_puc_configure_locked(pon);
-	mutex_lock(&pon->lock);
+		ret = __rtl_pon_puc_configure(pon);
 	if (ret)
 		goto ungate;
 	stage = "configuration restore";
@@ -695,9 +693,7 @@ void rtl_pon_xgpon_recovery(struct work_struct *work)
 		msleep(5);
 		rtl_pon_update(pon->control, BIT(8), BIT(8));
 		msleep(5);
-		mutex_unlock(&pon->lock);
-		ret = rtl_pon_puc_configure_locked(pon);
-		mutex_lock(&pon->lock);
+		ret = __rtl_pon_puc_configure(pon);
 		if (ret) goto retry;
 		pon->xgpon_recovery_phase = 3;
 	}

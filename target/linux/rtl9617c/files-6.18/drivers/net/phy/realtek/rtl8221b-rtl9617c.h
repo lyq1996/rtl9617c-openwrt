@@ -8,6 +8,8 @@
 #ifndef RTL8221B_RTL9617C_H
 #define RTL8221B_RTL9617C_H
 
+#include "../phylib-internal.h"
+
 struct rtl8221b_reg {
 	u16 reg, value;
 };

@@ -965,8 +965,11 @@ static int rtl9617c_pon_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(pon->tx_disable), "PON TX-disable GPIO\n");
 	{
 		struct device_node *node = of_parse_phandle(dev->of_node, "realtek,optical-front-end", 0);
-		struct i2c_client *client = of_find_i2c_device_by_node(node);
+		struct i2c_client *client;
 
+		if (!node)
+			return dev_err_probe(dev, -ENODEV, "missing realtek,optical-front-end\n");
+		client = of_find_i2c_device_by_node(node);
 		of_node_put(node);
 		if (!client)
 			return -EPROBE_DEFER;
@@ -983,7 +986,11 @@ static int rtl9617c_pon_probe(struct platform_device *pdev)
 	}
 	{
 		struct device_node *node = of_parse_phandle(dev->of_node, "realtek,network-engine", 0);
-		struct platform_device *engine = of_find_device_by_node(node);
+		struct platform_device *engine;
+
+		if (!node)
+			return dev_err_probe(dev, -ENODEV, "missing realtek,network-engine\n");
+		engine = of_find_device_by_node(node);
 		of_node_put(node);
 		if (!engine)
 			return -EPROBE_DEFER;
@@ -1034,14 +1041,11 @@ static int rtl9617c_pon_probe(struct platform_device *pdev)
 	if (IS_ERR(pon->optical_status))
 		return PTR_ERR(pon->optical_status);
 	{
-		struct resource optical = *platform_get_resource(pdev, IORESOURCE_MEM, 4);
+		struct resource *optical = platform_get_resource(pdev, IORESOURCE_MEM, 4);
 
-		optical.start += 8;
-		optical.end = optical.start + 7;
-		optical.name = "optical-irq";
-		pon->optical_irq = devm_ioremap_resource(dev, &optical);
-		if (IS_ERR(pon->optical_irq))
-			return PTR_ERR(pon->optical_irq);
+		pon->optical_irq = devm_ioremap(dev, optical->start + 8, 8);
+		if (!pon->optical_irq)
+			return -ENOMEM;
 	}
 	of_property_read_u32(dev->of_node, "realtek,los-invert", &pon->los_invert);
 	if (pon->los_invert > 1)

@@ -72,13 +72,13 @@ static int rtl_pdc_itu_configure(struct rtl9617c_pon *pon)
 	return 0;
 }
 
-int rtl_pon_pdc_configure_locked(struct rtl9617c_pon *pon)
+int __rtl_pon_pdc_configure(struct rtl9617c_pon *pon)
 {
 	unsigned int index;
 	int ret = 0;
 
 	lockdep_assert_held(&pon->control_lock);
-	mutex_lock(&pon->lock);
+	lockdep_assert_held(&pon->lock);
 	if (!pon->mac_prepared) {
 		ret = -EAGAIN;
 		goto unlock;
@@ -115,6 +115,15 @@ int rtl_pon_pdc_configure_locked(struct rtl9617c_pon *pon)
 	dev_info(pon->dev, "PDC: 256 downstream map entries configured for native CPU16\n");
 unlock:
 	pon->pdc_error = ret;
+	return ret;
+}
+
+int rtl_pon_pdc_configure_locked(struct rtl9617c_pon *pon)
+{
+	int ret;
+
+	mutex_lock(&pon->lock);
+	ret = __rtl_pon_pdc_configure(pon);
 	mutex_unlock(&pon->lock);
 	return ret;
 }

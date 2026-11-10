@@ -1160,11 +1160,15 @@ int rtl_fe_flush_port(struct rtl_fe *fe,struct net_device *netdev)
 }
 int rtl_fe_set_itu_paths(struct rtl_fe *fe,struct net_device *netdev,const struct rtl_itu_paths *paths)
 {
-	struct rtl_itu_paths *copy=paths?kvmalloc(rtl_itu_paths_bytes(paths),GFP_KERNEL):NULL;
+	struct rtl_itu_paths *copy = NULL;
 	struct rtl_fe_flow *flow,*next;
 	struct rtl_fe_port *port;
 	int ret=0;
 
+	if (!fe)
+		return paths ? -EOPNOTSUPP : 0;
+	if (paths)
+		copy = kvmalloc(rtl_itu_paths_bytes(paths), GFP_KERNEL);
 	if(paths && !copy)return -ENOMEM;
 	if(copy)memcpy(copy,paths,rtl_itu_paths_bytes(paths));
 	mutex_lock(&fe->lock);

@@ -325,6 +325,12 @@ static ssize_t phyreg_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RW(phyreg);
 
+static struct attribute *rtl_mdio_attrs[] = {
+	&dev_attr_phyreg.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(rtl_mdio);
+
 static int rtl_mdio_write_c45(struct mii_bus *bus, int phy, int devad, int reg, u16 value)
 {
 	return rtl_mdio_c45_xfer(bus->priv, phy, devad, reg, value, false);
@@ -398,7 +404,6 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct rtl9617c_mdio *mdio;
 	struct mii_bus *bus;
-	int ret;
 
 	bus = devm_mdiobus_alloc_size(dev, sizeof(*mdio));
 	if (!bus)
@@ -434,11 +439,7 @@ static int rtl_mdio_probe(struct platform_device *pdev)
 	dev_info(dev, "MDIO bus ready, internal OCP addresses mask %08x\n",
 		 mdio->ocp_mask);
 	platform_set_drvdata(pdev, mdio);
-	ret = devm_of_mdiobus_register(dev, bus, dev->of_node);
-	if (ret)
-		return ret;
-	device_create_file(dev, &dev_attr_phyreg);
-	return 0;
+	return devm_of_mdiobus_register(dev, bus, dev->of_node);
 }
 
 static const struct of_device_id rtl_mdio_match[] = {
@@ -448,7 +449,11 @@ MODULE_DEVICE_TABLE(of, rtl_mdio_match);
 
 static struct platform_driver rtl_mdio_driver = {
 	.probe = rtl_mdio_probe,
-	.driver = { .name = "rtl9617c-mdio", .of_match_table = rtl_mdio_match },
+	.driver = {
+		.name = "rtl9617c-mdio",
+		.of_match_table = rtl_mdio_match,
+		.dev_groups = rtl_mdio_groups,
+	},
 };
 module_platform_driver(rtl_mdio_driver);
 MODULE_DESCRIPTION("Native Taurus MDIO and internal copper PHY OCP access");

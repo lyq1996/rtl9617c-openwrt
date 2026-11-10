@@ -145,6 +145,11 @@ netdev_tx_t rtl_dma_tx_frame(struct rtl_dma_tx *tx, struct sk_buff *skb,
 	u32 low = frame ? frame->header_low : (16 << 9) | (tx->port << 3) | BIT(29);
 	u32 control = frame && frame->oam ? 0x61000000U : 0x61000002U;
 
+	if (length + 16 > RTL_DMA_BUFFER_SIZE) {
+		dev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
 	rtl_dma_tx_complete(tx, dev);
 	if (!rtl_dma_tx_available(tx)) {
 		netif_stop_queue(dev);

@@ -73,7 +73,7 @@ struct rtl_lan {
 #define RTL_P6_SETTLE_MS	400
 #define RTL_P6_PROFILE_STEP_US	10
 #define RTL_P6_CLOCK_BIT	BIT(13)
-#define RTL_P6_CLOCK_TRIES	1501
+#define RTL_P6_CLOCK_TIMEOUT_MS	15010
 #define RTL_P6_CLOCK_STEP_MS	10
 
 #define XGE_MAC_CFG_COM		0xb200
@@ -127,6 +127,7 @@ struct rtl_xram {
 	u32 qx_last;
 	bool tx_pending;
 	unsigned int tx_length;
+	struct net_device *tx_dev;
 	u8 tx_buffer[2048];
 	bool dma_tx;
 	struct rtl_dma_tx dma;
@@ -496,6 +497,16 @@ static int rtl_poll(struct napi_struct *napi, int budget)
 	return packets;
 }
 
+static void rtl_wake_ports(struct rtl_xram *priv)
+{
+	unsigned int port;
+
+	for (port = 0; port < ARRAY_SIZE(priv->ports); port++)
+		if (priv->ports[port] && netif_running(priv->ports[port]) &&
+		    netif_queue_stopped(priv->ports[port]))
+			netif_wake_queue(priv->ports[port]);
+}
+
 static enum hrtimer_restart rtl_timer(struct hrtimer *timer)
 {
 	struct rtl_xram *priv = container_of(timer, struct rtl_xram, timer);
@@ -512,19 +523,16 @@ static enum hrtimer_restart rtl_timer(struct hrtimer *timer)
 		if (endpoint && rtl_dma_tx_available(&priv->dma))
 			endpoint->wake(endpoint);
 		rcu_read_unlock();
-		if (rtl_dma_tx_available(&priv->dma)) {
-			unsigned int port;
-
-			for (port = 0; port < ARRAY_SIZE(priv->ports); port++)
-				if (priv->ports[port] && netif_running(priv->ports[port]) &&
-				    netif_queue_stopped(priv->ports[port]))
-					netif_wake_queue(priv->ports[port]);
-		}
+		if (rtl_dma_tx_available(&priv->dma))
+			rtl_wake_ports(priv);
 	} else if (priv->tx_pending && rtl_pointer(priv, TX_READ) == rtl_pointer(priv, TX_WRITE)) {
 		priv->tx_pending = false;
-		priv->netdev->stats.tx_packets++;
-		priv->netdev->stats.tx_bytes += priv->tx_length;
-		netif_wake_queue(priv->netdev);
+		if (priv->tx_dev) {
+			priv->tx_dev->stats.tx_packets++;
+			priv->tx_dev->stats.tx_bytes += priv->tx_length;
+			priv->tx_dev = NULL;
+		}
+		rtl_wake_ports(priv);
 	}
 	spin_unlock(&priv->tx_lock);
 	hrtimer_forward_now(timer, ms_to_ktime(1));
@@ -535,7 +543,9 @@ static irqreturn_t rtl_rx_irq(int irq, void *data)
 {
 	struct rtl_xram *priv = data;
 
+	spin_lock(&priv->rx_lock);
 	rtl_update(priv, 0x6110, 0xff, 0);
+	spin_unlock(&priv->rx_lock);
 	napi_schedule_irqoff(&priv->napi);
 	return IRQ_HANDLED;
 }
@@ -587,6 +597,7 @@ static netdev_tx_t rtl_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 	priv->tx_pending = true;
 	priv->tx_length = skb->len;
+	priv->tx_dev = dev;
 	netif_stop_queue(dev);
 	wmb();
 	writel(rtl_xram_tx_next(pointer, wire), priv->ni + TX_WRITE);
@@ -674,6 +685,7 @@ static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 #define RTL_P6_REG_DATAIN	0x50
 #define RTL_P6_REG_ACCESS	0x4c
 #define RTL_P6_REG_DATAOUT	0x54
+#define RTL_P6_REG_STATUS	0x58
 #define RTL_P6_SDS_WE		BIT(30)
 #define RTL_P6_SDS_ACCESS	BIT(31)
 
@@ -683,12 +695,7 @@ static void rtl_p6_ind_write(struct rtl_xram *priv, u32 addr, u16 data)
 	writel(RTL_P6_SDS_ACCESS | RTL_P6_SDS_WE | (addr & 0x7ffU),
 	       priv->p6_serdes + RTL_P6_REG_ACCESS);
 
-	mdelay(1);
-}
-
-static bool rtl_p6_clock_ready(struct rtl_xram *priv)
-{
-	return readl(priv->p6_serdes + 0x58) & RTL_P6_CLOCK_BIT;
+	usleep_range(1000, 2000);
 }
 
 #define RTL_P6_LANE_STRIDE	4
@@ -724,7 +731,7 @@ static void rtl_p6_mac_config(struct rtl_xram *priv)
 	writel(value | 0x80000000U, ni + XGE_MISC_CONFIG);
 	writel(value | 0xb0000000U, ni + XGE_MISC_CONFIG);
 
-	mdelay(10);
+	msleep(10);
 
 	writel(readl(ni + XGE_MAC_CFG_TX) & ~0x3U, ni + XGE_MAC_CFG_TX);
 	writel(readl(ni + XGE_MAC_CFG_TX) | 1, ni + XGE_MAC_CFG_TX);
@@ -735,7 +742,7 @@ static void rtl_p6_mac_config(struct rtl_xram *priv)
 	value = readl(ni + XGE_MAC_CFG_COM);
 	value = (value | 0x00008000U | 0x00004000U) & 0xffffdfffU & 0xffffff8fU;
 	writel(value, ni + XGE_MAC_CFG_COM);
-	mdelay(10);
+	msleep(10);
 	value = readl(ni + XGE_MAC_CFG_COM);
 	value &= 0xffff7fffU & 0xffffbfffU & 0xffffdfffU & 0xffffff8fU;
 	writel(value, ni + XGE_MAC_CFG_COM);
@@ -757,7 +764,7 @@ static void rtl_p6_serdes_init(struct rtl_xram *priv, u32 word, u32 iface,
 			       struct rtl_p6_profile *profile)
 {
 	u32 value;
-	unsigned int i;
+	int ret;
 
 	if (priv->qm.block_reset) {
 		value = readl(priv->qm.block_reset);
@@ -769,7 +776,7 @@ static void rtl_p6_serdes_init(struct rtl_xram *priv, u32 word, u32 iface,
 
 	writel(readl(priv->p6_serdes) | BIT(0), priv->p6_serdes);
 	writel(readl(priv->p6_serdes + 0x4) | 0x1f, priv->p6_serdes + 0x4);
-	mdelay(1);
+	usleep_range(1000, 2000);
 	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | iface,
 	       priv->p6_serdes + 0x4);
 	rtl_p6_mode_word(priv, word);
@@ -784,11 +791,14 @@ static void rtl_p6_serdes_init(struct rtl_xram *priv, u32 word, u32 iface,
 
 	writel(readl(priv->p6_serdes) & ~BIT(0), priv->p6_serdes);
 
-	for (i = 0; i < RTL_P6_CLOCK_TRIES && !rtl_p6_clock_ready(priv); i++)
-		mdelay(RTL_P6_CLOCK_STEP_MS);
-
-	if (i < RTL_P6_CLOCK_TRIES)
-		mdelay(RTL_P6_SETTLE_MS);
+	ret = readl_poll_timeout(priv->p6_serdes + RTL_P6_REG_STATUS, value,
+				 value & RTL_P6_CLOCK_BIT,
+				 RTL_P6_CLOCK_STEP_MS * USEC_PER_MSEC,
+				 RTL_P6_CLOCK_TIMEOUT_MS * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(priv->netdev->dev.parent, "P6: SerDes clock not ready\n");
+	else
+		msleep(RTL_P6_SETTLE_MS);
 }
 
 static void rtl_p6_bringup(struct rtl_xram *priv)
@@ -821,17 +831,19 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 
 		value = readl(priv->qm.block_reset);
 		writel(value | BIT(31), priv->qm.block_reset);
-		mdelay(50);
+		msleep(50);
 
 		value = readl(priv->qm.block_reset);
 		writel(value & ~BIT(31), priv->qm.block_reset);
-		mdelay(1);
+		usleep_range(1000, 2000);
 	}
 
 	rtl_p6_serdes_init(priv, RTL_P6_MODE_SGMII_2G5, RTL_P6_IFACE_SGMII_2G5,
 			   &priv->p6_profile[0]);
 
-	if (priv->sgmii && priv->sgmii_speed != SPEED_2500) {
+	if (!priv->sgmii) {
+		priv->sgmii_speed = SPEED_2500;
+	} else if (priv->sgmii_speed != SPEED_2500) {
 		int sret = phy_set_speed(priv->sgmii, SPEED_2500);
 
 		if (sret)
@@ -864,11 +876,11 @@ static void rtl_p6_mac_iface_select(struct rtl_xram *priv)
 	writel(value & ~(BIT(31) | (3U << 28)), ni + XGE_MISC_CONFIG);
 	writel((value & ~(BIT(31) | (3U << 28))) | BIT(31) | BIT(28),
 	       ni + XGE_MISC_CONFIG);
-	mdelay(10);
+	msleep(10);
 
 	value = readl(ni + XGE_MAC_CFG_COM);
 	writel(value | BIT(13), ni + XGE_MAC_CFG_COM);
-	mdelay(10);
+	msleep(10);
 	value = readl(ni + XGE_MAC_CFG_COM);
 	writel(value & ~BIT(13), ni + XGE_MAC_CFG_COM);
 
@@ -892,7 +904,7 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 
 	rtl_p6_serdes_init(priv, word, iface, profile);
 
-	if (!two_g5 && priv->sgmii) {
+	if (priv->sgmii) {
 		int sret = phy_set_speed(priv->sgmii, speed);
 
 		if (sret)
@@ -913,11 +925,8 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	u32 config;
 	int ret;
 
-	if (priv->ports[6]) {
+	if (priv->ports[6])
 		rtl_p6_bringup(priv);
-
-		priv->sgmii_speed = SPEED_2500;
-	}
 
 	if (priv->dma_tx) {
 
@@ -939,7 +948,8 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	if (priv->qm_rx) {
 		ret = rtl_qm_rx_start(&priv->qm, priv->port);
 		if (ret) {
-			rtl_dma_tx_stop(&priv->dma);
+			if (priv->dma_tx)
+				rtl_dma_tx_stop(&priv->dma);
 			return ret;
 		}
 
@@ -972,6 +982,7 @@ static int rtl_engine_start(struct rtl_xram *priv)
 	       priv->ni + XRAM_CFG);
 	rtl_rx_mode(dev);
 	priv->tx_pending = false;
+	priv->tx_dev = NULL;
 	napi_enable(&priv->napi);
 	if (priv->qm_rx) {
 		unsigned long flags;
@@ -1112,10 +1123,12 @@ void rtl9617c_ni_close(struct device *dev, struct net_device *owner)
 	struct rtl_xram *priv = netdev_priv(dev_get_drvdata(dev));
 	unsigned long flags;
 
-	rtl_fe_flush_port(priv->fe,owner);
-	spin_lock_irqsave(&priv->tx_lock, flags);
-	rtl_dma_tx_forget(&priv->dma, owner);
-	spin_unlock_irqrestore(&priv->tx_lock, flags);
+	rtl_fe_flush_port(priv->fe, owner);
+	if (priv->dma_tx) {
+		spin_lock_irqsave(&priv->tx_lock, flags);
+		rtl_dma_tx_forget(&priv->dma, owner);
+		spin_unlock_irqrestore(&priv->tx_lock, flags);
+	}
 	rtl_engine_put(priv);
 }
 EXPORT_SYMBOL_GPL(rtl9617c_ni_close);
@@ -1127,6 +1140,11 @@ netdev_tx_t rtl9617c_ni_transmit(struct device *dev, struct net_device *owner,
 	unsigned long flags;
 	netdev_tx_t result;
 
+	if (!priv->dma_tx) {
+		owner->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
 	spin_lock_irqsave(&priv->tx_lock, flags);
 	result = rtl_dma_tx_frame(&priv->dma, skb, owner, frame);
 	spin_unlock_irqrestore(&priv->tx_lock, flags);
@@ -1216,6 +1234,8 @@ static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)
 	}
 	spin_lock_irqsave(&priv->tx_lock, flags);
 	priv->ports[port] = NULL;
+	if (priv->tx_dev == dev)
+		priv->tx_dev = NULL;
 	spin_unlock_irqrestore(&priv->tx_lock, flags);
 	rcu_assign_pointer(priv->qm.lan[port], NULL);
 	if (priv->registered_ports & BIT(port))
@@ -1227,6 +1247,18 @@ static void rtl_unregister_lan(struct rtl_xram *priv, unsigned int port)
 	if (dev != priv->netdev)
 		free_netdev(dev);
 	priv->registered_ports &= ~BIT(port);
+}
+
+static int rtl_phy_missing(struct device_node *phy)
+{
+	struct device_node *bus_np = of_get_parent(phy);
+	struct mii_bus *bus = bus_np ? of_mdio_find_bus(bus_np) : NULL;
+
+	of_node_put(bus_np);
+	if (!bus)
+		return -EPROBE_DEFER;
+	put_device(&bus->dev);
+	return -ENODEV;
 }
 
 static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
@@ -1258,7 +1290,7 @@ static int rtl_register_lan(struct rtl_xram *priv, struct device *parent,
 	eth_hw_addr_set(dev, mac);
 	phydev = of_phy_find_device(phy);
 	if (!phydev) {
-		ret = -ENODEV;
+		ret = rtl_phy_missing(phy);
 		goto put_phy;
 	}
 	ret = phy_connect_direct(dev, phydev, rtl_adjust_link,
@@ -1315,11 +1347,11 @@ put_phy:
 	return ret;
 }
 
-static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
+static int rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 {
 	struct device_node *phy;
 	unsigned int port;
-	int ret;
+	int ret = 0;
 
 	rtnl_lock();
 	for (port = 0; port < 5; port++) {
@@ -1332,6 +1364,8 @@ static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 			continue;
 		}
 		ret = rtl_register_lan(priv, parent, port, phy);
+		if (ret == -EPROBE_DEFER)
+			goto unlock;
 		if (ret)
 			dev_err(parent, "LAN%u initialization failed: %d; other ports retained\n",
 				port + 1, ret);
@@ -1339,10 +1373,18 @@ static void rtl_register_lans(struct rtl_xram *priv, struct device *parent)
 	phy = of_parse_phandle(parent->of_node, "realtek,p6-phy", 0);
 	if (phy) {
 		ret = rtl_register_lan(priv, parent, 6, phy);
+		if (ret == -EPROBE_DEFER)
+			goto unlock;
 		if (ret)
 			dev_err(parent, "P6 initialization failed: %d\n", ret);
 	}
+	ret = 0;
+unlock:
 	rtnl_unlock();
+	if (ret)
+		for (port = 0; port < ARRAY_SIZE(priv->ports); port++)
+			rtl_unregister_lan(priv, port);
+	return ret;
 }
 
 static int rtl_probe(struct platform_device *pdev)
@@ -1441,7 +1483,9 @@ static int rtl_probe(struct platform_device *pdev)
 		}
 	}
 	platform_set_drvdata(pdev, netdev);
-	rtl_register_lans(priv, dev);
+	ret = rtl_register_lans(priv, dev);
+	if (ret)
+		goto free_dma;
 	schedule_delayed_work(&priv->mib_work, HZ);
 	return 0;
 

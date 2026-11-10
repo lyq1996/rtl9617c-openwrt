@@ -115,7 +115,7 @@ static inline int rtl_bosa_calibrate(const struct rtl_bosa_io *io,
 		BOSA_READ(0xb1);
 		BOSA_READ(0xb7);
 	} else {
-		return -22;
+		return -EINVAL;
 	}
 #undef BOSA_WRITE
 #undef BOSA_RANGE

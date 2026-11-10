@@ -277,4 +277,6 @@ int rtl_pon_mpcp_stop_locked(struct rtl9617c_pon *pon);
 int rtl_pon_mpcp_configure_locked(struct rtl9617c_pon *pon);
 int rtl_pon_pdc_configure_locked(struct rtl9617c_pon *pon);
 int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon);
+int __rtl_pon_pdc_configure(struct rtl9617c_pon *pon);
+int __rtl_pon_puc_configure(struct rtl9617c_pon *pon);
 #endif

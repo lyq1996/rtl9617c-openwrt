@@ -197,7 +197,7 @@ static int rtl_puc_itu_configure(struct rtl9617c_pon *pon, const struct rtl_dq_i
 	return 0;
 }
 
-int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
+int __rtl_pon_puc_configure(struct rtl9617c_pon *pon)
 {
 	u32 status;
 	unsigned int i, ports = pon->llid_count;
@@ -206,7 +206,7 @@ int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
 	const struct rtl_dq_io bp = {pon, rtl_puc_bp_read, rtl_puc_bp_write, rtl_puc_bp_access};
 
 	lockdep_assert_held(&pon->control_lock);
-	mutex_lock(&pon->lock);
+	lockdep_assert_held(&pon->lock);
 	if (!pon->mac_prepared) {
 		ret = -EAGAIN;
 		goto unlock;
@@ -314,6 +314,15 @@ int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
 	dev_info(pon->dev, "PUC: %u LLID ports, %u queues each, 256 CIR/PIR entries\n", ports, queues);
 unlock:
 	pon->puc_error = ret;
+	return ret;
+}
+
+int rtl_pon_puc_configure_locked(struct rtl9617c_pon *pon)
+{
+	int ret;
+
+	mutex_lock(&pon->lock);
+	ret = __rtl_pon_puc_configure(pon);
 	mutex_unlock(&pon->lock);
 	return ret;
 }
