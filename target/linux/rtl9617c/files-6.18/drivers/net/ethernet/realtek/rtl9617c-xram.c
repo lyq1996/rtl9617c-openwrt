@@ -66,8 +66,12 @@ struct rtl_lan {
 #define RTL_P6_QX_BASE		0xf550d000UL
 #define RTL_P6_MAX_WRITES	400
 #define RTL_P6_MODE_SGMII_1G	0x4cf6
-
 #define RTL_P6_MODE_SGMII_2G5	0x5cf5
+#define RTL_P6_IFACE_SGMII	0x02
+#define RTL_P6_IFACE_SGMII_2G5	0x12
+#define RTL_P6_PMA_CTRL		0x160
+#define RTL_P6_SETTLE_MS	400
+#define RTL_P6_PROFILE_STEP_US	10
 #define RTL_P6_CLOCK_BIT	BIT(13)
 #define RTL_P6_CLOCK_TRIES	1501
 #define RTL_P6_CLOCK_STEP_MS	10
@@ -103,7 +107,7 @@ struct rtl_xram {
 	void __iomem *ni;
 	void __iomem *xram;
 	void __iomem *p6_serdes;
-	struct rtl_p6_profile p6_profile;
+	struct rtl_p6_profile p6_profile[2];
 	bool p6_started;
 	u32 p6_rx_bypass_saved;
 	bool p6_rx_bypass_active;
@@ -661,8 +665,10 @@ static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 {
 	unsigned int i;
 
-	for (i = 0; i < profile->count; i++)
+	for (i = 0; i < profile->count; i++) {
 		writel(profile->word[i][1], priv->p6_serdes + profile->word[i][0]);
+		udelay(RTL_P6_PROFILE_STEP_US);
+	}
 }
 
 #define RTL_P6_REG_DATAIN	0x50
@@ -674,7 +680,7 @@ static void rtl_p6_apply(struct rtl_xram *priv, struct rtl_p6_profile *profile)
 static void rtl_p6_ind_write(struct rtl_xram *priv, u32 addr, u16 data)
 {
 	writel(data, priv->p6_serdes + RTL_P6_REG_DATAIN);
-	writel(RTL_P6_SDS_ACCESS | RTL_P6_SDS_WE | (addr & 0xffff),
+	writel(RTL_P6_SDS_ACCESS | RTL_P6_SDS_WE | (addr & 0x7ffU),
 	       priv->p6_serdes + RTL_P6_REG_ACCESS);
 
 	mdelay(1);
@@ -747,9 +753,46 @@ static void rtl_p6_mac_config(struct rtl_xram *priv)
 	       ni + QM_ES_CTRL);
 }
 
+static void rtl_p6_serdes_init(struct rtl_xram *priv, u32 word, u32 iface,
+			       struct rtl_p6_profile *profile)
+{
+	u32 value;
+	unsigned int i;
+
+	if (priv->qm.block_reset) {
+		value = readl(priv->qm.block_reset);
+		writel(value | BIT(31), priv->qm.block_reset);
+		udelay(1);
+		writel(readl(priv->qm.block_reset) & ~BIT(31),
+		       priv->qm.block_reset);
+	}
+
+	writel(readl(priv->p6_serdes) | BIT(0), priv->p6_serdes);
+	writel(readl(priv->p6_serdes + 0x4) | 0x1f, priv->p6_serdes + 0x4);
+	mdelay(1);
+	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | iface,
+	       priv->p6_serdes + 0x4);
+	rtl_p6_mode_word(priv, word);
+
+	rtl_p6_ind_write(priv, RTL_P6_PMA_CTRL, 0x009f);
+
+	if (rtl_p6_read(priv, profile) == 0)
+		rtl_p6_apply(priv, profile);
+	else
+		dev_warn(priv->netdev->dev.parent, "serdes load %s failed\n",
+			 profile->path);
+
+	writel(readl(priv->p6_serdes) & ~BIT(0), priv->p6_serdes);
+
+	for (i = 0; i < RTL_P6_CLOCK_TRIES && !rtl_p6_clock_ready(priv); i++)
+		mdelay(RTL_P6_CLOCK_STEP_MS);
+
+	if (i < RTL_P6_CLOCK_TRIES)
+		mdelay(RTL_P6_SETTLE_MS);
+}
+
 static void rtl_p6_bringup(struct rtl_xram *priv)
 {
-	unsigned int i;
 	u32 value;
 
 	if (!priv->p6_serdes || priv->p6_started)
@@ -785,27 +828,8 @@ static void rtl_p6_bringup(struct rtl_xram *priv)
 		mdelay(1);
 	}
 
-	writel(readl(priv->p6_serdes) | BIT(0), priv->p6_serdes);
-	writel(readl(priv->p6_serdes + 0x4) | 0x1f, priv->p6_serdes + 0x4);
-	mdelay(1);
-	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | 2, priv->p6_serdes + 0x4);
-	rtl_p6_mode_word(priv, RTL_P6_MODE_SGMII_2G5);
-
-	rtl_p6_ind_write(priv, 0x405, 0x009f);
-
-	if (rtl_p6_read(priv, &priv->p6_profile) == 0)
-		rtl_p6_apply(priv, &priv->p6_profile);
-	else
-		dev_warn(priv->netdev->dev.parent, "serdes load %s failed\n",
-			 priv->p6_profile.path);
-
-	writel((readl(priv->p6_serdes + 0x4) & ~0x1fU) | 0x12,
-	       priv->p6_serdes + 0x4);
-	rtl_p6_mode_word(priv, RTL_P6_MODE_SGMII_2G5);
-	writel(readl(priv->p6_serdes) & ~BIT(0), priv->p6_serdes);
-
-	for (i = 0; i < RTL_P6_CLOCK_TRIES && !rtl_p6_clock_ready(priv); i++)
-		mdelay(RTL_P6_CLOCK_STEP_MS);
+	rtl_p6_serdes_init(priv, RTL_P6_MODE_SGMII_2G5, RTL_P6_IFACE_SGMII_2G5,
+			   &priv->p6_profile[0]);
 
 	if (priv->sgmii && priv->sgmii_speed != SPEED_2500) {
 		int sret = phy_set_speed(priv->sgmii, SPEED_2500);
@@ -854,6 +878,10 @@ static void rtl_p6_mac_iface_select(struct rtl_xram *priv)
 
 static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 {
+	bool two_g5 = speed == SPEED_2500;
+	struct rtl_p6_profile *profile = &priv->p6_profile[two_g5 ? 0 : 1];
+	u32 word = two_g5 ? RTL_P6_MODE_SGMII_2G5 : RTL_P6_MODE_SGMII_1G;
+	u32 iface = two_g5 ? RTL_P6_IFACE_SGMII_2G5 : RTL_P6_IFACE_SGMII;
 
 	if (!priv->p6_serdes)
 		return;
@@ -861,6 +889,18 @@ static void rtl_p6_set_speed(struct rtl_xram *priv, unsigned int speed)
 	if (priv->sgmii_speed == speed)
 		return;
 	priv->sgmii_speed = speed;
+
+	rtl_p6_serdes_init(priv, word, iface, profile);
+
+	if (!two_g5 && priv->sgmii) {
+		int sret = phy_set_speed(priv->sgmii, speed);
+
+		if (sret)
+			dev_warn(priv->netdev->dev.parent,
+				 "P6: S3 lane %uM programming failed: %d\n",
+				 speed, sret);
+	}
+
 	rtl_p6_mac_config(priv);
 
 	rtl_p6_mac_iface_select(priv);
@@ -1326,7 +1366,8 @@ static int rtl_probe(struct platform_device *pdev)
 		ret = IS_ERR(priv->ni) ? PTR_ERR(priv->ni) : PTR_ERR(priv->xram);
 		goto free_netdev;
 	}
-	priv->p6_profile.path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
+	priv->p6_profile[0].path = "/etc/serdes/p6_serdes_sgmii_2g5.txt";
+	priv->p6_profile[1].path = "/etc/serdes/p6_serdes_sgmii_1g.txt";
 	if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "p6-serdes")) {
 		priv->p6_serdes = devm_platform_ioremap_resource_byname(pdev,
 								       "p6-serdes");
