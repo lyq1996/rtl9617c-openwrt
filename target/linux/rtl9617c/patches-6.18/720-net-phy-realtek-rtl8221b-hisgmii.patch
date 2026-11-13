@@ -3,9 +3,9 @@ Subject: [PATCH] net: phy: realtek: add RTL8221B HiSGMII support
 
 Add a driver entry for RTL8221B parts strapped for HiSGMII/SGMII
 operation. The entry is selected by the "realtek,hisgmii" device tree
-property, optionally programs the SerDes option mode, loads a PHY patch
-from firmware, reports the SerDes interface that follows the resolved
-speed and exposes the PHY LEDs through phylib.
+property, optionally programs the SerDes option mode, applies a built-in
+PHY patch when "realtek,vendor-patch" is set, reports the SerDes interface
+that follows the resolved speed and exposes the PHY LEDs through phylib.
 
 Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
 ---

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <linux/bitfield.h>
 #include <linux/delay.h>
-#include <linux/firmware.h>
 #include <linux/mdio.h>
 #include <linux/mii.h>
 #include <linux/of.h>
@@ -9,6 +8,7 @@
 #include <linux/slab.h>
 
 #include "realtek.h"
+#include "realtek_hisgmii_patch.h"
 
 #define RTL8221B_ID_MASK		0xfffffff0
 #define RTL8221B_ID			0x001cc840
@@ -47,30 +47,7 @@
 #define RTL8221B_LED_CFG_INIT		0x00a7
 #define RTL8221B_LED_CFG_ON		0x0025
 
-#define RTL8221B_FW_MAGIC		"RTL8221B"
-#define RTL8221B_FW_VERSION		1
-
-enum rtl8221b_fw_section {
-	RTL8221B_FW_RAM,
-	RTL8221B_FW_PATCH,
-	RTL8221B_FW_POST,
-	RTL8221B_FW_SECTIONS,
-};
-
-struct rtl8221b_fw_header {
-	char magic[8];
-	__le16 version;
-	__le16 count[RTL8221B_FW_SECTIONS];
-};
-
-struct rtl8221b_fw_reg {
-	__le16 reg;
-	__le16 val;
-};
-
 struct rtl8221b_hisgmii_priv {
-	const struct rtl8221b_fw_reg *section[RTL8221B_FW_SECTIONS];
-	unsigned int count[RTL8221B_FW_SECTIONS];
 	bool patch;
 	bool serdes_option;
 	u32 serdes_option_mode;
@@ -87,68 +64,21 @@ int rtl8221b_hisgmii_match_phy_device(struct phy_device *phydev,
 	return of_property_read_bool(phydev->mdio.dev.of_node, "realtek,hisgmii");
 }
 
-static int rtl8221b_hisgmii_parse_fw(struct phy_device *phydev,
-				     struct rtl8221b_hisgmii_priv *priv,
-				     const struct firmware *fw)
-{
-	const struct rtl8221b_fw_header *hdr = (const void *)fw->data;
-	const struct rtl8221b_fw_reg *regs;
-	size_t total = 0;
-	unsigned int i;
-
-	if (fw->size < sizeof(*hdr) ||
-	    memcmp(hdr->magic, RTL8221B_FW_MAGIC, sizeof(hdr->magic)) ||
-	    le16_to_cpu(hdr->version) != RTL8221B_FW_VERSION)
-		return -EINVAL;
-
-	for (i = 0; i < RTL8221B_FW_SECTIONS; i++)
-		total += le16_to_cpu(hdr->count[i]);
-	if (fw->size != sizeof(*hdr) + total * sizeof(*regs))
-		return -EINVAL;
-
-	regs = devm_kmemdup(&phydev->mdio.dev, fw->data + sizeof(*hdr),
-			    total * sizeof(*regs), GFP_KERNEL);
-	if (!regs)
-		return -ENOMEM;
-
-	for (i = 0; i < RTL8221B_FW_SECTIONS; i++) {
-		priv->section[i] = regs;
-		priv->count[i] = le16_to_cpu(hdr->count[i]);
-		regs += priv->count[i];
-	}
-	priv->patch = true;
-	return 0;
-}
-
 int rtl8221b_hisgmii_probe(struct phy_device *phydev)
 {
 	struct device_node *np = phydev->mdio.dev.of_node;
 	struct rtl8221b_hisgmii_priv *priv;
-	const struct firmware *fw;
-	const char *name;
-	int ret;
 
 	priv = devm_kzalloc(&phydev->mdio.dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 	phydev->priv = priv;
 
+	priv->patch = of_property_read_bool(np, "realtek,vendor-patch");
 	priv->serdes_option = !of_property_read_u32(np, "realtek,serdes-option-mode",
 						    &priv->serdes_option_mode);
 
-	if (of_property_read_string(np, "firmware-name", &name))
-		return 0;
-
-	ret = request_firmware(&fw, name, &phydev->mdio.dev);
-	if (ret) {
-		phydev_warn(phydev, "patch %s unavailable: %d\n", name, ret);
-		return 0;
-	}
-	ret = rtl8221b_hisgmii_parse_fw(phydev, priv, fw);
-	release_firmware(fw);
-	if (ret)
-		phydev_err(phydev, "invalid patch %s: %d\n", name, ret);
-	return ret;
+	return 0;
 }
 
 static int rtl8221b_hisgmii_wait_ready(struct phy_device *phydev)
@@ -173,17 +103,16 @@ static int rtl8221b_hisgmii_sram_write(struct phy_device *phydev, u16 addr,
 	return phy_write_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_SRAM_DATA, val);
 }
 
-static int rtl8221b_hisgmii_write_section(struct phy_device *phydev,
-					  enum rtl8221b_fw_section section)
+static int rtl8221b_hisgmii_write_regs(struct phy_device *phydev,
+				       const struct rtl8221b_reg *regs,
+				       unsigned int count)
 {
-	struct rtl8221b_hisgmii_priv *priv = phydev->priv;
-	const struct rtl8221b_fw_reg *regs = priv->section[section];
 	unsigned int i;
 	int ret;
 
-	for (i = 0; i < priv->count[section]; i++) {
-		ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, le16_to_cpu(regs[i].reg),
-				    le16_to_cpu(regs[i].val));
+	for (i = 0; i < count; i++) {
+		ret = phy_write_mmd(phydev, MDIO_MMD_VEND2, regs[i].reg,
+				    regs[i].value);
 		if (ret < 0)
 			return ret;
 	}
@@ -241,7 +170,8 @@ static int rtl8221b_hisgmii_load_patch(struct phy_device *phydev)
 			       RTL8221B_PATCH_CTRL_RAM);
 	if (ret < 0)
 		return ret;
-	ret = rtl8221b_hisgmii_write_section(phydev, RTL8221B_FW_RAM);
+	ret = rtl8221b_hisgmii_write_regs(phydev, rtl8221b_patch_ram,
+					  ARRAY_SIZE(rtl8221b_patch_ram));
 	if (ret < 0)
 		return ret;
 	ret = phy_clear_bits_mmd(phydev, MDIO_MMD_VEND2, RTL8221B_VND2_PATCH_CTRL,
@@ -249,7 +179,8 @@ static int rtl8221b_hisgmii_load_patch(struct phy_device *phydev)
 	if (ret < 0)
 		return ret;
 
-	ret = rtl8221b_hisgmii_write_section(phydev, RTL8221B_FW_PATCH);
+	ret = rtl8221b_hisgmii_write_regs(phydev, rtl8221b_patch_regs,
+					  ARRAY_SIZE(rtl8221b_patch_regs));
 	if (ret < 0)
 		return ret;
 
@@ -281,7 +212,8 @@ static int rtl8221b_hisgmii_load_patch(struct phy_device *phydev)
 	if (ret < 0)
 		return ret;
 
-	ret = rtl8221b_hisgmii_write_section(phydev, RTL8221B_FW_POST);
+	ret = rtl8221b_hisgmii_write_regs(phydev, rtl8221b_patch_analog,
+					  ARRAY_SIZE(rtl8221b_patch_analog));
 	if (ret < 0)
 		return ret;
 
