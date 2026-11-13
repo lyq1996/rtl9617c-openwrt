@@ -9,6 +9,6 @@ case "$1" in
 	*) ni_cpus=f ;;
 esac
 
-for irq in $(awk '$NF == "rtl9617c-rx0" { sub(":", "", $1); print $1 }' /proc/interrupts); do
+for irq in $(awk '$NF == "rtl9617c_ni" { sub(":", "", $1); print $1 }' /proc/interrupts); do
 	echo "$ni_cpus" > "/proc/irq/$irq/smp_affinity"
 done

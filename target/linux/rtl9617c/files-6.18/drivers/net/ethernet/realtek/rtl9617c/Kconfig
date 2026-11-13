@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config RTL9617C_NI
+	tristate "Realtek RTL9617C network interface support"
+	depends on ARCH_RTL9617C || COMPILE_TEST
+	depends on OF && HAS_IOMEM && HAS_DMA
+	select PHYLINK
+	select REGMAP_MMIO
+	help
+	  This driver supports the network interface of Realtek RTL9617C
+	  SoCs. Each Ethernet port described in the device tree is exposed
+	  as its own network device.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rtl9617c-ni.
+
+config RTL9617C_FE
+	bool "Realtek RTL9617C flow engine offload"
+	depends on RTL9617C_NI && ARCH_RTL9617C
+	depends on BRIDGE && (BRIDGE = y || RTL9617C_NI = m)
+	depends on NETFILTER_INGRESS && INET
+	select NETFILTER_FAMILY_BRIDGE
+	select SKB_EXTENSIONS
+	help
+	  Offload routed and bridged flows to the flow engine of the
+	  Realtek RTL9617C network interface through the flow block API
+	  used by tc flower and the netfilter flowtable.
+
+config RTL9617C_BOSA
+	tristate "Realtek RTL9617C optical front end support"
+	depends on ARCH_RTL9617C && OF && I2C
+	select FW_LOADER
+	help
+	  Calibration support for the optical front end attached to the
+	  PON interface of Realtek RTL9617C SoCs.
+
+config RTL9617C_PON
+	tristate "Realtek RTL9617C PON MAC support"
+	depends on ARCH_RTL9617C && OF
+	depends on RTL9617C_NI && RTL9617C_BOSA
+	select FW_LOADER
+	select CRYPTO_AES
+	select CRYPTO_CMAC
+	select CRYPTO_LIB_AES
+	select SKB_EXTENSIONS
+	help
+	  EPON, GPON and XG(S)-PON MAC support for Realtek RTL9617C SoCs.

@@ -84,10 +84,6 @@
 			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		};
 
-		lan0 {
-			label = "LED_EPHY0";
-			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
-		};
 		lan1 {
 			label = "LED_EPHY1";
 			gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
@@ -204,9 +200,6 @@
 &mdio {
 	status = "okay";
 
-	phy1: ethernet-phy@1 {
-		reg = <1>;
-	};
 	phy2: ethernet-phy@2 {
 		reg = <2>;
 	};
@@ -219,11 +212,72 @@
 
 	phy_2p5g: ethernet-phy@6 {
 		reg = <6>;
+		realtek,hisgmii;
+		realtek,serdes-option-mode = <1>;
 
-		realtek,hsgmii;
-		realtek,no-vendor-finish;
+		leds {
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-		realtek,oem-sds-option;
+			led@0 {
+				reg = <0>;
+				label = "LED_8221B_P6_0";
+				default-state = "on";
+			};
+
+			led@1 {
+				reg = <1>;
+				label = "LED_8221B_P6_1";
+				default-state = "on";
+			};
+
+			led@2 {
+				reg = <2>;
+				label = "LED_8221B_P6_2";
+				default-state = "on";
+			};
+		};
+	};
+};
+
+&serdes {
+	status = "okay";
+};
+
+&ni {
+	nvmem-cells = <&base_mac 0>;
+	nvmem-cell-names = "mac-address";
+	status = "okay";
+
+	ethernet-ports {
+		port@1 {
+			reg = <1>;
+			label = "lan2";
+			phy-mode = "internal";
+			phy-handle = <&phy2>;
+		};
+
+		port@2 {
+			reg = <2>;
+			label = "lan3";
+			phy-mode = "internal";
+			phy-handle = <&phy3>;
+		};
+
+		port@3 {
+			reg = <3>;
+			label = "lan4";
+			phy-mode = "internal";
+			phy-handle = <&phy4>;
+		};
+
+		port@6 {
+			reg = <6>;
+			label = "lan1";
+			phy-mode = "2500base-x";
+			phy-handle = <&phy_2p5g>;
+			phys = <&serdes>;
+		};
 	};
 };
 
@@ -236,15 +290,6 @@
 };
 
 &{/soc} {
-	sgmii_lane: sgmii@f43200c4 {
-		compatible = "realtek,rtl9617c-sgmii";
-		reg = <0 0xf43200c4 0 0x20>, <0 0xf43200a0 0 4>,
-		      <0 0xf432036c 0 4>, <4 0xf433b000 0 0x1000>,
-		      <0 0xf4600000 0 0x1000>;
-		reg-names = "control", "reset", "power", "analog", "serdes";
-		#phy-cells = <0>;
-	};
-
 	gpio0: gpio@4f43292c0 {
 		compatible = "realtek,rtl9617c-gpio";
 		reg = <4 0xf43292c0 0 0xb4>;
@@ -263,36 +308,11 @@
 		interrupts = <GIC_SPI 1 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
-	ni0: ethernet@4f4300000 {
-		compatible = "realtek,rtl9617c-ni";
-		nvmem-cells = <&base_mac 0>;
-		nvmem-cell-names = "mac-address";
-		reg = <4 0xf4300000 0 0x10000>, <0 0xf4500000 0 0x2000>,
-		      <4 0xf7001000 0 0x1000>, <4 0xf432d000 0 0x1000>,
-		      <4 0xf4320098 0 4>, <4 0xf432f000 0 0x1000>,
-		      <4 0xf550d000 0 0x1000>;
-		reg-names = "ni", "xram", "dma-lso", "qm-axi-reorder", "block-reset",
-			    "l3fe-axi-reorder", "p6-serdes";
-
-		realtek,dma-tx;
-		realtek,qm-rx;
-
-		realtek,port = <0>;
-		phy-handle = <&phy1>;
-
-		realtek,lan-phys = <&phy1 &phy2 &phy3 &phy4>;
-
-		realtek,p6-phy = <&phy_2p5g>;
-		phys = <&sgmii_lane>;
-		phy-names = "sgmii";
-		interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
-	};
-
 	pon@4f5500000 {
 		compatible = "realtek,rtl9617c-pon";
 		nvmem-cells = <&epon_mac 0>, <&pon_sn 0>;
 		nvmem-cell-names = "mac-address", "pon-serial";
-		realtek,network-engine = <&ni0>;
+		realtek,network-engine = <&ni>;
 		realtek,optical-front-end = <&bosa0>;
 		tx-disable-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
 		reg = <4 0xf5500000 0 0xc000>, <4 0xf4320094 0 4>,

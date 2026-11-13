@@ -1,0 +1,32 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] phy: realtek: add RTL9617C Ethernet SerDes driver
+
+Add a generic PHY driver for the Ethernet SerDes of the Realtek RTL9617C
+SoC. The SerDes is configured for SGMII or 2500BASE-X through
+phy_set_mode_ext() and the SGMII PCS speed through phy_set_speed().
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+---
+--- a/drivers/phy/realtek/Kconfig
++++ b/drivers/phy/realtek/Kconfig
+@@ -30,3 +30,13 @@
+ 	  of the parameters.
+ 
+ endif # ARCH_REALTEK || COMPILE_TEST
++
++config PHY_RTL9617C_SERDES
++	tristate "Realtek RTL9617C Ethernet SerDes PHY driver"
++	depends on ARCH_RTL9617C || COMPILE_TEST
++	depends on OF && HAS_IOMEM
++	select GENERIC_PHY
++	help
++	  Enable this to support the Ethernet SerDes of Realtek RTL9617C SoCs.
++	  The SerDes connects the network interface to an external PHY using
++	  SGMII or 2500BASE-X.
+--- a/drivers/phy/realtek/Makefile
++++ b/drivers/phy/realtek/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_PHY_RTK_RTD_USB2PHY)	+= phy-rtk-usb2.o
+ obj-$(CONFIG_PHY_RTK_RTD_USB3PHY)	+= phy-rtk-usb3.o
++obj-$(CONFIG_PHY_RTL9617C_SERDES)	+= phy-rtl9617c-serdes.o

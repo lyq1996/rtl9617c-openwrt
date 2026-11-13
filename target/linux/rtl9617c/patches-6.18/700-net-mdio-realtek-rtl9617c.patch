@@ -1,0 +1,40 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] net: mdio: add Realtek RTL9617C MDIO driver
+
+Add a driver for the MDIO controller of the Realtek RTL9617C SoC. External
+PHYs are reached through Clause 22 and Clause 45 frames on the MDIO pins,
+while the integrated Gigabit PHYs are accessed through their memory mapped
+register window.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+---
+--- a/drivers/net/mdio/Kconfig
++++ b/drivers/net/mdio/Kconfig
+@@ -170,6 +170,17 @@
+ 	  This driver supports the MDIO interface found in the Realtek
+ 	  RTL9300 family of Ethernet switches with integrated SoC.
+ 
++config MDIO_REALTEK_RTL9617C
++	tristate "Realtek RTL9617C MDIO interface support"
++	depends on ARCH_RTL9617C || COMPILE_TEST
++	depends on OF && HAS_IOMEM
++	select OF_MDIO
++	help
++	  This driver supports the MDIO interface found in Realtek RTL9617C
++	  SoCs. External PHYs are accessed with Clause 22 and Clause 45
++	  frames on the MDIO pins, while the integrated Gigabit Ethernet PHYs
++	  are accessed through their memory mapped register window.
++
+ config MDIO_REGMAP
+ 	tristate
+ 	help
+--- a/drivers/net/mdio/Makefile
++++ b/drivers/net/mdio/Makefile
+@@ -21,6 +21,7 @@
+ obj-$(CONFIG_MDIO_MVUSB)		+= mdio-mvusb.o
+ obj-$(CONFIG_MDIO_OCTEON)		+= mdio-octeon.o
+ obj-$(CONFIG_MDIO_REALTEK_RTL9300)	+= mdio-realtek-rtl9300.o
++obj-$(CONFIG_MDIO_REALTEK_RTL9617C)	+= mdio-realtek-rtl9617c.o
+ obj-$(CONFIG_MDIO_REGMAP)		+= mdio-regmap.o
+ obj-$(CONFIG_MDIO_SUN4I)		+= mdio-sun4i.o
+ obj-$(CONFIG_MDIO_THUNDER)		+= mdio-thunder.o

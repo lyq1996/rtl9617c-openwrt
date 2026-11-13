@@ -181,14 +181,43 @@
 
 		mdio: mdio@4f4329118 {
 			compatible = "realtek,rtl9617c-mdio";
-			// MDIO, PHY OCP and wrapper windows from the stock NI reg list.
 			reg = <4 0xf4329118 0 0x48>,
-			      <4 0xf4600000 0 0x100000>,
-			      <4 0xf4700000 0 0x100>;
-			reg-names = "mdio", "gphy-ocp", "gphy-wrap";
+			      <4 0xf4600000 0 0x100000>;
+			reg-names = "mdio", "gphy";
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
+		};
+
+		serdes: phy@4f550d000 {
+			compatible = "realtek,rtl9617c-serdes";
+			reg = <4 0xf550d000 0 0x1000>,
+			      <0 0xf43200c4 0 0x20>,
+			      <0 0xf43200a0 0 0x4>,
+			      <0 0xf432036c 0 0x4>,
+			      <4 0xf433b000 0 0x1000>,
+			      <0 0xf4600000 0 0x1000>;
+			reg-names = "sds", "lane-ctrl", "lane-reset", "lane-power",
+				    "lane-analog", "lane-tx";
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		ni: ethernet@4f4300000 {
+			compatible = "realtek,rtl9617c-ni";
+			reg = <4 0xf4300000 0 0x10000>,
+			      <4 0xf7001000 0 0x1000>,
+			      <4 0xf432d000 0 0x1000>,
+			      <4 0xf4320098 0 0x4>,
+			      <4 0xf432f000 0 0x1000>;
+			reg-names = "ni", "dma", "qm-axi", "reset", "fe-axi";
+			interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
+			status = "disabled";
+
+			ethernet-ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+			};
 		};
 
 		qspi: spi@4f4324000 {
