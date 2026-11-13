@@ -2,12 +2,13 @@
 #ifndef RTL9617C_FE_H
 #define RTL9617C_FE_H
 #include <linux/device.h>
+#include <linux/regmap.h>
 #include <linux/netdevice.h>
 
 struct rtl_fe;
 struct rtl_itu_paths;
 int rtl_fe_set_itu_paths(struct rtl_fe *fe, struct net_device *dev, const struct rtl_itu_paths *paths);
-struct rtl_fe *rtl_fe_allocate(struct device *device, void __iomem *registers);
+struct rtl_fe *rtl_fe_allocate(struct device *device, struct regmap *regs);
 void rtl_fe_free(struct rtl_fe *fe);
 int rtl_fe_add_port(struct rtl_fe *fe, struct net_device *netdev,
                     unsigned int source, unsigned int destination, unsigned int llid);

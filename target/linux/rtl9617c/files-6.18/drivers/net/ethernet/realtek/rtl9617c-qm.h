@@ -2,6 +2,7 @@
 #ifndef RTL9617C_QM_H
 #define RTL9617C_QM_H
 #include <linux/dma-mapping.h>
+#include <linux/regmap.h>
 #include <linux/netdevice.h>
 #include "rtl9617c-qm-layout.h"
 #include "rtl9617c-ni.h"
@@ -18,6 +19,7 @@
 #define RTL_QM_PE_BUFFERS 2496
 
 struct rtl_qm_rx {
+	struct regmap *regs;
 	void __iomem *ni;
 	void __iomem *axi_reorder;
 	void __iomem *block_reset;

@@ -1,0 +1,20 @@
+From: Leo <62428370+LeoooChen@users.noreply.github.com>
+Subject: [PATCH] net: ethernet: require the bridge for the XRAM driver
+
+The flow engine is linked into the XRAM driver unconditionally and calls
+the bridge FDB and VLAN helpers. Depend on BRIDGE so the driver cannot be
+built without those symbols.
+
+Signed-off-by: Leo <62428370+LeoooChen@users.noreply.github.com>
+---
+--- a/drivers/net/ethernet/realtek/Kconfig
++++ b/drivers/net/ethernet/realtek/Kconfig
+@@ -18,7 +18,8 @@ config RTL9617C_XRAM_ETH
+ 	tristate "RTL9617C management XRAM Ethernet"
+ 	depends on OF && ARCH_RTL9617C
+ 	depends on LEDS_CLASS
++	depends on BRIDGE
+ 	select PHYLINK
+ 	select CRC32
+ 	select NETFILTER
+ 	select NETFILTER_INGRESS

@@ -106,7 +106,7 @@ static int fe_evto_upstream(struct rtl_fe_rule *data,struct rtl_evto_packet *log
 	struct fe_evto_result result;
 	bool replace=data->action.vlan_set;
 	int ret=fe_evto_invariant(data->input->fe->itu_paths,logical,!exact&&!replace,
-	                          data->bridge,false,0,&result);
+	                          data->kind==RTL_FE_RULE_BRIDGE,false,0,&result);
 	if(ret)return ret;
 	ret=fe_evto_output(data,&result.output,replace||!result.passthrough);
 	if(ret)return ret;
@@ -167,7 +167,7 @@ static int fe_evto_downstream(struct rtl_fe_rule *data,const struct rtl_evto_pac
 			}
 	}
 	if(!selected || physical.count>2)return -EOPNOTSUPP;
-	int ret=fe_evto_invariant(paths,&physical,true,data->bridge,true,selected->index,&result);
+	int ret=fe_evto_invariant(paths,&physical,true,data->kind==RTL_FE_RULE_BRIDGE,true,selected->index,&result);
 	if(ret || !fe_evto_shape(&result.output,logical))return -EOPNOTSUPP;
 	if(!data->action.vlan_set) {
 		ret=fe_evto_output(data,&result.output,!result.passthrough);
@@ -187,15 +187,15 @@ static int fe_itu_rule(struct rtl_fe_rule *data)
 {
 	struct rtl_fe *fe=data->input->fe;
 	struct rtl_evto_packet packet;
-	unsigned int protocol=data->bridge?data->ethernet_protocol:data->pppoe_input?ETH_P_PPP_SES:
-	                          data->ipv6?ETH_P_IPV6:ETH_P_IP;
+	unsigned int protocol=data->kind==RTL_FE_RULE_BRIDGE?data->ethernet_protocol:data->pppoe_input?ETH_P_PPP_SES:
+	                          data->kind==RTL_FE_RULE_IPV6?ETH_P_IPV6:ETH_P_IP;
 	if(data->input->netdev==fe->itu_netdev) {
 		fe_evto_packet(&packet,data->vlan,data->vlan_count,protocol);
-		packet.service_entry=!data->bridge && packet.count;
-		if(!data->bridge && data->key.protocol==IPPROTO_UDP) {
+		packet.service_entry=data->kind!=RTL_FE_RULE_BRIDGE && packet.count;
+		if(data->kind!=RTL_FE_RULE_BRIDGE && data->key.protocol==IPPROTO_UDP) {
 			unsigned int a=data->key.source_port,b=data->key.destination_port;
-			if(!data->ipv6&&(a==67||a==68)&&(b==67||b==68))packet.criteria=1;
-			if(data->ipv6&&(a==546||a==547)&&(b==546||b==547))packet.criteria=2;
+			if(data->kind!=RTL_FE_RULE_IPV6&&(a==67||a==68)&&(b==67||b==68))packet.criteria=1;
+			if(data->kind==RTL_FE_RULE_IPV6&&(a==546||a==547)&&(b==546||b==547))packet.criteria=2;
 		}
 		if(!fe->itu_paths->profile_count) {
 			const struct rtl_itu_path *path=rtl_itu_path_downstream(fe->itu_paths,
@@ -205,17 +205,17 @@ static int fe_itu_rule(struct rtl_fe_rule *data)
 		} else if(fe_evto_downstream(data,&packet))return -EOPNOTSUPP;
 	}
 	if(data->output->netdev==fe->itu_netdev) {
-		protocol=data->egress_pppoe?ETH_P_PPP_SES:data->bridge?data->ethernet_protocol:
-			                                                        data->ipv6?ETH_P_IPV6:ETH_P_IP;
+		protocol=data->egress_pppoe?ETH_P_PPP_SES:data->kind==RTL_FE_RULE_BRIDGE?data->ethernet_protocol:
+			                                                        data->kind==RTL_FE_RULE_IPV6?ETH_P_IPV6:ETH_P_IP;
 		fe_evto_packet(&packet,data->action.vlan,data->action.vlan_count,protocol);
-		packet.service_entry=!data->bridge && packet.count;
-		if(!data->bridge && data->key.protocol==IPPROTO_UDP) {
+		packet.service_entry=data->kind!=RTL_FE_RULE_BRIDGE && packet.count;
+		if(data->kind!=RTL_FE_RULE_BRIDGE && data->key.protocol==IPPROTO_UDP) {
 			unsigned int a=data->key.source_port,b=data->key.destination_port;
 			if(data->action.translate) {
 				if(data->action.translate_destination)b=data->action.port;else a=data->action.port;
 			}
-			if(!data->ipv6&&(a==67||a==68)&&(b==67||b==68))packet.criteria=1;
-			if(data->ipv6&&(a==546||a==547)&&(b==546||b==547))packet.criteria=2;
+			if(data->kind!=RTL_FE_RULE_IPV6&&(a==67||a==68)&&(b==67||b==68))packet.criteria=1;
+			if(data->kind==RTL_FE_RULE_IPV6&&(a==546||a==547)&&(b==546||b==547))packet.criteria=2;
 		}
 		if(fe_evto_upstream(data,&packet,data->vlan_exact))return -EOPNOTSUPP;
 	}

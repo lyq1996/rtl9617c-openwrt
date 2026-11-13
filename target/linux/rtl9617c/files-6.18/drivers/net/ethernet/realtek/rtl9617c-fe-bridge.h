@@ -17,6 +17,9 @@ struct fe_bridge_packet {
 	u16 vid;
 };
 
+unsigned int fe_learned_max = 16384;
+module_param_named(learned_max, fe_learned_max, uint, 0644);
+
 struct fe_bridge_wire_port {
 	struct list_head list;
 	struct nf_hook_ops hook;
@@ -26,18 +29,16 @@ struct rtl_fe_bridge {
 	struct rtl_fe *fe;
 	struct delayed_work work;
 	struct notifier_block netdev, switchdev, blocking;
-	struct pernet_operations pernet;
 	struct nf_hook_ops hooks[2];
 	spinlock_t pending_lock;
 	unsigned int read, write;
 	atomic_t epoch, flush;
 	struct list_head wire_ports;
+	unsigned int learned_count;
+	u64 drops;
 	bool stopping;
 	struct fe_bridge_packet pending[FE_BRIDGE_PENDING];
 };
-
-/* There is one NI/FE complex on RTL9617C. Namespace hooks share that owner. */
-static struct rtl_fe_bridge *fe_bridge_owner;
 
 static struct net_device *fe_bridge_physical(struct net_device *dev,
                                              struct rtl9617c_bridge_frame *frame,u32 priority)
@@ -114,9 +115,18 @@ static void fe_bridge_wire_port(struct rtl_fe_bridge *bridge,struct net_device *
 
 	list_for_each_entry(port,&bridge->wire_ports,list)
 		if(port->hook.dev==dev) {
+			struct net *net=dev_net(dev);
+			bool last=true;
+
 			if(add)return;
-			nf_unregister_net_hook(dev_net(dev),&port->hook);
-			list_del(&port->list);kfree(port);return;
+			nf_unregister_net_hook(net,&port->hook);
+			list_del(&port->list);kfree(port);
+			list_for_each_entry(port,&bridge->wire_ports,list)
+				if(dev_net(port->hook.dev)==net) {
+					last=false;break;
+				}
+			if(last)nf_unregister_net_hooks(net,bridge->hooks,2);
+			return;
 		}
 	if(!add)return;
 	mutex_lock(&bridge->fe->lock);
@@ -129,6 +139,16 @@ static void fe_bridge_wire_port(struct rtl_fe_bridge *bridge,struct net_device *
 		.pf=NFPROTO_NETDEV,.hooknum=NF_NETDEV_INGRESS,.priority=INT_MIN+1};
 	ret=nf_register_net_hook(dev_net(dev),&port->hook);
 	if(ret){kfree(port);return;}
+	{
+		struct fe_bridge_wire_port *other;
+		bool first=true;
+
+		list_for_each_entry(other,&bridge->wire_ports,list)
+			if(dev_net(other->hook.dev)==dev_net(dev)) {
+				first=false;break;
+			}
+		if(first)nf_register_net_hooks(dev_net(dev),bridge->hooks,2);
+	}
 	list_add_tail(&port->list,&bridge->wire_ports);
 }
 
@@ -215,7 +235,7 @@ static bool fe_bridge_ports(struct net *net,unsigned int index,unsigned int ingr
 static int fe_bridge_learn(struct rtl_fe_bridge *bridge,const struct fe_bridge_packet *packet)
 {
 	struct rtl_fe *fe=bridge->fe;
-	struct rtl_fe_rule data={.bridge=true,.vlan_exact=true};
+	struct rtl_fe_rule data={.kind=RTL_FE_RULE_BRIDGE,.vlan_exact=true};
 	struct rtl_fe_flow *flow;
 	struct net_device *outdev=__dev_get_by_index(packet->net,packet->egress);
 	unsigned int i;
@@ -285,9 +305,14 @@ static int fe_bridge_learn(struct rtl_fe_bridge *bridge,const struct fe_bridge_p
 		if(ret)return ret;
 	}
 	data.ethernet_bytes=ETH_HLEN+VLAN_HLEN*data.action.vlan_count+(data.pppoe_input?8:0);
+	if(bridge->learned_count>=fe_learned_max) {
+		bridge->drops++;
+		return -ENOSPC;
+	}
 	/* A live flow allocation is its unique cookie; clsact/flowtable own other cookies. */
 	ret=fe_install(data.input,data,0);
 	if(ret)return ret;
+	bridge->learned_count++;
 	flow=list_last_entry(&fe->flows,struct rtl_fe_flow,list);
 	flow->cookie=(unsigned long)flow;flow->learned=true;
 	flow->bridge_index=packet->bridge;flow->bridge_vid=packet->vid;
@@ -303,7 +328,6 @@ static void fe_bridge_work(struct work_struct *work)
 	struct rtl_fe_bridge *bridge=container_of(to_delayed_work(work),struct rtl_fe_bridge,work);
 	struct rtl_fe *fe=bridge->fe;
 	struct rtl_fe_flow *flow,*next;
-	struct rtl_dq_io io=fe_io(fe);
 	bool flush=atomic_xchg(&bridge->flush,0);
 	bool active=false;
 	unsigned int budget=FE_BRIDGE_PENDING;
@@ -324,9 +348,9 @@ static void fe_bridge_work(struct work_struct *work)
 			fe_delete(fe,flow);continue;
 		}
 		lifetime=clock_t_to_jiffies(br_get_ageing_time(__dev_get_by_index(net,flow->bridge_index)));
-		if(rtl_fe_main_age_read(&io,flow->hash_index,&age))continue;
+		if(rtl_fe_main_age_read(fe,flow->hash_index,&age))continue;
 		if(age>1) {
-			rtl_fe_main_age(&io,flow->hash_index,1);
+			rtl_fe_main_age(fe,flow->hash_index,1);
 			flow->lastused=jiffies;
 			br_fdb_refresh_offload(__dev_get_by_index(net,flow->bridge_ingress),flow->ethernet_source,flow->bridge_vid,true);
 			br_fdb_refresh_offload(__dev_get_by_index(net,flow->bridge_egress),flow->destination,flow->bridge_vid,false);
@@ -366,10 +390,8 @@ static int fe_bridge_netdev_event(struct notifier_block *notifier,unsigned long 
 	return NOTIFY_DONE;
 }
 
-static int fe_bridge_switch_event(struct notifier_block *notifier,unsigned long event,void *ptr)
+static int fe_bridge_switch_common(struct rtl_fe_bridge *bridge,unsigned long event)
 {
-	struct rtl_fe_bridge *bridge=fe_bridge_owner;
-
 	if(event==SWITCHDEV_FDB_ADD_TO_DEVICE || event==SWITCHDEV_FDB_DEL_TO_DEVICE ||
 				event==SWITCHDEV_PORT_OBJ_ADD || event==SWITCHDEV_PORT_OBJ_DEL || event==SWITCHDEV_PORT_ATTR_SET) {
 		atomic_inc(&bridge->epoch);
@@ -380,13 +402,19 @@ static int fe_bridge_switch_event(struct notifier_block *notifier,unsigned long 
 	return NOTIFY_DONE;
 }
 
-static int fe_bridge_net_init(struct net *net)
+static int fe_bridge_switch_event(struct notifier_block *notifier,unsigned long event,void *ptr)
 {
-	return nf_register_net_hooks(net,fe_bridge_owner->hooks,2);
+	return fe_bridge_switch_common(container_of(notifier,struct rtl_fe_bridge,switchdev),event);
 }
-static void fe_bridge_net_exit(struct net *net)
+
+static int fe_bridge_blocking_event(struct notifier_block *notifier,unsigned long event,void *ptr)
 {
-	nf_unregister_net_hooks(net,fe_bridge_owner->hooks,2);
+	return fe_bridge_switch_common(container_of(notifier,struct rtl_fe_bridge,blocking),event);
+}
+
+void fe_bridge_flow_removed(struct rtl_fe *fe)
+{
+	if(fe->bridge && fe->bridge->learned_count)fe->bridge->learned_count--;
 }
 
 static struct rtl_fe_bridge *fe_bridge_start(struct rtl_fe *fe)
@@ -401,17 +429,13 @@ static struct rtl_fe_bridge *fe_bridge_start(struct rtl_fe *fe)
 	INIT_DELAYED_WORK(&bridge->work,fe_bridge_work);
 	bridge->netdev.notifier_call=fe_bridge_netdev_event;
 	bridge->switchdev.notifier_call=fe_bridge_switch_event;
-	bridge->blocking.notifier_call=fe_bridge_switch_event;
-	bridge->pernet.init=fe_bridge_net_init;bridge->pernet.exit=fe_bridge_net_exit;
+	bridge->blocking.notifier_call=fe_bridge_blocking_event;
 	bridge->hooks[0]=(struct nf_hook_ops){.hook=fe_bridge_capture,.priv=bridge,
 		.pf=NFPROTO_BRIDGE,.hooknum=NF_BR_PRE_ROUTING,.priority=INT_MIN};
 	bridge->hooks[1]=(struct nf_hook_ops){.hook=fe_bridge_forwarded,.priv=bridge,
 		.pf=NFPROTO_BRIDGE,.hooknum=NF_BR_POST_ROUTING,.priority=INT_MAX};
-	fe_bridge_owner=bridge;
-	ret=register_pernet_subsys(&bridge->pernet);
-	if(ret)goto free;
 	ret=register_switchdev_notifier(&bridge->switchdev);
-	if(ret)goto pernet;
+	if(ret)goto free;
 	ret=register_switchdev_blocking_notifier(&bridge->blocking);
 	if(ret)goto switchdev;
 	ret=register_netdevice_notifier(&bridge->netdev);
@@ -421,8 +445,6 @@ blocking:
 	unregister_switchdev_blocking_notifier(&bridge->blocking);
 switchdev:
 	unregister_switchdev_notifier(&bridge->switchdev);
-pernet:
-	unregister_pernet_subsys(&bridge->pernet);
 free:
 	WRITE_ONCE(bridge->stopping,true);
 	cancel_delayed_work_sync(&bridge->work);
@@ -430,7 +452,7 @@ free:
 		put_net(bridge->pending[bridge->read].net);
 		bridge->read=(bridge->read+1)%FE_BRIDGE_PENDING;
 	}
-	fe_bridge_owner=NULL;kfree(bridge);return ERR_PTR(ret);
+	kfree(bridge);return ERR_PTR(ret);
 }
 
 static void fe_bridge_stop(struct rtl_fe_bridge *bridge)
@@ -441,17 +463,25 @@ static void fe_bridge_stop(struct rtl_fe_bridge *bridge)
 	unregister_netdevice_notifier(&bridge->netdev);
 	rtnl_lock();
 	list_for_each_entry_safe(port,next,&bridge->wire_ports,list) {
-		nf_unregister_net_hook(dev_net(port->hook.dev),&port->hook);
+		struct net *net=dev_net(port->hook.dev);
+		struct fe_bridge_wire_port *other;
+		bool last=true;
+
+		nf_unregister_net_hook(net,&port->hook);
 		list_del(&port->list);kfree(port);
+		list_for_each_entry(other,&bridge->wire_ports,list)
+			if(dev_net(other->hook.dev)==net) {
+				last=false;break;
+			}
+		if(last)nf_unregister_net_hooks(net,bridge->hooks,2);
 	}
 	rtnl_unlock();
 	unregister_switchdev_blocking_notifier(&bridge->blocking);
 	unregister_switchdev_notifier(&bridge->switchdev);
-	unregister_pernet_subsys(&bridge->pernet);
 	cancel_delayed_work_sync(&bridge->work);
 	while(bridge->read!=bridge->write) {
 		put_net(bridge->pending[bridge->read].net);
 		bridge->read=(bridge->read+1)%FE_BRIDGE_PENDING;
 	}
-	fe_bridge_owner=NULL;kfree(bridge);
+	kfree(bridge);
 }

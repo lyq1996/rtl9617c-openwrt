@@ -348,7 +348,7 @@ static void rtl_mdio_detect(struct device *dev, struct rtl9617c_mdio *mdio)
 	int phy, err, id1, id2;
 	u32 c22, ocp;
 
-	dev_info(dev, "MDIO_CFG=%08x GPHY_CTRL12=%08x GPHY_CTRL13=%08x\n",
+	dev_dbg(dev, "MDIO_CFG=%08x GPHY_CTRL12=%08x GPHY_CTRL13=%08x\n",
 		 readl(mdio->per + MDIO_CFG), readl(mdio->wrap + GPHY_CTRL12),
 		 readl(mdio->wrap + GPHY_CTRL13));
 
@@ -365,7 +365,7 @@ static void rtl_mdio_detect(struct device *dev, struct rtl9617c_mdio *mdio)
 		}
 		if (use_ocp)
 			mdio->ocp_mask |= BIT(phy);
-		dev_info(dev, "phy%d: window=%08x%s%08x -> %s\n", phy, ocp,
+		dev_dbg(dev, "phy%d: window=%08x%s%08x -> %s\n", phy, ocp,
 			 use_c22 ? " pins=" : "", c22,
 			 use_ocp ? "internal GPHY" : use_c22 ? "MDIO pins" : "absent");
 	}
@@ -374,12 +374,12 @@ static void rtl_mdio_detect(struct device *dev, struct rtl9617c_mdio *mdio)
 		c22 = rtl_mdio_c22_id(mdio, phy, &err);
 		if (err || !rtl_mdio_id_valid(c22))
 			continue;
-		dev_info(dev, "phy%d: C22=%08x on the MDIO pins\n", phy, c22);
+		dev_dbg(dev, "phy%d: C22=%08x on the MDIO pins\n", phy, c22);
 	}
 
 	id1 = rtl_mdio_c45_xfer(mdio, 7, MDIO_MMD_PMAPMD, MII_PHYSID1, 0, true);
 	id2 = rtl_mdio_c45_xfer(mdio, 7, MDIO_MMD_PMAPMD, MII_PHYSID2, 0, true);
-	dev_info(dev, "phy7: C45 PMAPMD id1=%d id2=%d\n", id1, id2);
+	dev_dbg(dev, "phy7: C45 PMAPMD id1=%d id2=%d\n", id1, id2);
 }
 
 static int rtl_mdio_reset(struct mii_bus *bus)

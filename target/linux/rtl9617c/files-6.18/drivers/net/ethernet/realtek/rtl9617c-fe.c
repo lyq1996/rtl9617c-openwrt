@@ -14,6 +14,7 @@
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/rhashtable.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
@@ -21,126 +22,20 @@
 #include <net/flow_offload.h>
 #include <net/pkt_cls.h>
 #include "rtl9617c-fe.h"
+#include "rtl9617c-fe-regs.h"
 #include "rtl9617c-fe-pipeline.h"
-#include "rtl9617c-pon-path.h"
+#include "rtl9617c-itu.h"
 #include <linux/rtl9617c-bridge.h>
 
 struct rtl_fe_bridge;
 static struct rtl_fe_bridge *fe_bridge_start(struct rtl_fe *fe);
 static void fe_bridge_stop(struct rtl_fe_bridge *bridge);
 
-#define FE_INTERFACES 64
-#define FE_COUNTERS 32
-#define FE_SOURCE_MACS 15
-#define FE_LAN_PORTS 5
-#define FE_LAN_RX_CTRL(port) (0xa5f8+0x90*(port))
+#include "rtl9617c-fe-priv.h"
 
-struct rtl_fe_port {
-	struct list_head list;
-	struct rtl_fe *fe;
-	struct net_device *netdev;
-	unsigned int source, destination, llid, bindings;
-	bool retired;
-};
-struct rtl_fe_mac {
-	unsigned int users, saved[5];
-	u8 address[ETH_ALEN];
-};
-struct rtl_fe_interface {
-	unsigned int users, saved, source_mac, pppoe;
-	bool counted;
-};
-struct rtl_fe_mtu {
-	unsigned int users, size, saved;
-};
-struct rtl_fe_flow {
-	struct list_head list;
-	unsigned long cookie, lastused;
-	struct rtl_fe_port *input, *output;
-	unsigned int hash_index, counter, source_mac, destination_index;
-	unsigned int pppoe, mtu_index;
-	unsigned int ingress_session;
-	unsigned int ingress_pol;
-	u8 ip_source[16],ip_destination[16],protocol;
-	u8 ethernet_source[ETH_ALEN];
-	u16 ethernet_protocol;
-	u16 source_port,destination_port;
-	bool ipv6, bridge;
-	bool learned;
-	unsigned int bridge_index;
-	unsigned int bridge_ingress, bridge_egress;
-	u8 bridge_tags;
-	struct {u16 tci,protocol;} bridge_tag[2];
-	u16 bridge_vid;
-	u16 bridge_ppp_protocol;
-	unsigned int destination_saved[4];
-	u16 crc16;
-	unsigned char ethernet_bytes;
-	bool destination_created;
-	bool mtu_owned;
-	bool published, source_owned, destination_owned, interface_owned, counted, installed, deleting;
-	u8 destination[ETH_ALEN];
-	u64 bytes;
-	u32 packets;
-};
-static const unsigned int fe_registers[] = {
-	0x3834,0x3838,0x383c,0x3840,0x3844,0x3848,0x384c,0x3850,
-	0x3854,0x3858,0x385c,0x38a0,0x38b8,0x38bc,0x38c4,0x3924,0x3724,
-	0x3400,0x3404,0x3414,0x3418,0x341c,0x3420,0x3424,0x3428,
-	0x3700,0x3704,0x3708,0x370c,0x3710,0x3714,0x3718,0x371c,0x3720,0x3860,0x394c,0x3950,0x3954,0x3958,0x395c,
-	0x2300,0x23a0,0x23a4,0xa1e0,
-	0x3278,0x327c,0x3280,
-	0x3500,0x3504,0x351c,
-	0x3940,0x3944,0x3948,0x3c80,
-	0x3508,0x30cc,0x30a4,0x3218,
-};
-struct rtl_fe {
-	struct device *device;
-	void __iomem *registers;
-	struct mutex lock;
-	struct delayed_work cleanup_work;
-	struct list_head ports, flows, blocks;
-	void *memory;
-	dma_addr_t dma;
-	bool enabled, prepared;
-	int error;
-	u64 installs, deletes, misses;
-	unsigned int saved[ARRAY_SIZE(fe_registers)], mask_saved[8];
-	unsigned int bridge_mask_saved[3][8];
-	struct rtl_fe_cam_protocol protocol_cam[3];
-	unsigned char ppp_protocol_ids[2];
-	unsigned int lan_saved[FE_LAN_PORTS];
-	unsigned int classifier_saved[2][7], map_saved[2][4];
-	struct rtl_fe_mac source_macs[FE_SOURCE_MACS];
-	struct rtl_fe_interface interfaces[FE_INTERFACES];
-	struct rtl_fe_mtu mtus[16];
-	struct rtl_itu_paths *itu_paths;
-	struct net_device *itu_netdev;
-	struct rtl_fe_bridge *bridge;
-	DECLARE_BITMAP(hashes,RTL_FE_HASH_ENTRIES);
-	DECLARE_BITMAP(counters,FE_INTERFACES);
-};
-static unsigned int fe_read(void *context,unsigned int address)
-{
-	struct rtl_fe *fe=context;
-	return readl(fe->registers+address);
-}
-static void fe_write(void *context,unsigned int address,unsigned int value)
-{
-	struct rtl_fe *fe=context;
-	writel(value,fe->registers+address);
-}
-static int fe_access(void *context,unsigned int address,unsigned int value)
-{
-	struct rtl_fe *fe=context;
-	u32 status, busy=(address==0x38b0 || address==0x393c)?1:BIT(31);
-	writel(value,fe->registers+address);
-	return readl_poll_timeout(fe->registers+address,status,!(status&busy),1,100000);
-}
-static struct rtl_dq_io fe_io(struct rtl_fe *fe)
-{
-	return (struct rtl_dq_io){fe,fe_read,fe_write,fe_access};
-}
+
+
+
 static struct rtl_fe_port *fe_port(struct rtl_fe *fe,struct net_device *netdev)
 {
 	struct rtl_fe_port *port;
@@ -148,12 +43,15 @@ static struct rtl_fe_port *fe_port(struct rtl_fe *fe,struct net_device *netdev)
 		if(!port->retired && port->netdev==netdev)return port;
 	return NULL;
 }
+static const struct rhashtable_params fe_flow_params = {
+	.head_offset=offsetof(struct rtl_fe_flow,node),
+	.key_offset=offsetof(struct rtl_fe_flow,cookie),
+	.key_len=sizeof(unsigned long),
+	.automatic_shrinking=true,
+};
 static struct rtl_fe_flow *fe_flow(struct rtl_fe *fe,unsigned long cookie)
 {
-	struct rtl_fe_flow *flow;
-	list_for_each_entry(flow,&fe->flows,list)
-		if(flow->cookie==cookie)return flow;
-	return NULL;
+	return rhashtable_lookup_fast(&fe->cookies,&cookie,fe_flow_params);
 }
 static void fe_collect_ports(struct rtl_fe *fe)
 {
@@ -171,36 +69,36 @@ static void fe_collect_ports(struct rtl_fe *fe)
 
 static int fe_prepare(struct rtl_fe *fe)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	const unsigned int bridge_masks[]={61,59,57};
 	unsigned int mask[8],cls[7],lpb[3],i,side;
 	int ret;
 
 	for(i=0;i<ARRAY_SIZE(fe_registers);i++)fe->saved[i]=fe_read(fe,fe_registers[i]);
-	for(i=0;i<FE_LAN_PORTS;i++)fe->lan_saved[i]=fe_read(fe,FE_LAN_RX_CTRL(i));
-	ret=rtl_fe_mask_read(&io,63,fe->mask_saved);
+	for(i=0;i<FE_LAN_PORTS;i++)fe->lan_saved[i]=fe_read(fe,RTL_NI_LAN_RX_CTRL(i));
+	fe->xge_saved=fe_read(fe,RTL_NI_XGE_BYPASS_CFG);
+	ret=rtl_fe_mask_read(fe,63,fe->mask_saved);
 	if(ret)return ret;
 	for(i=0;i<ARRAY_SIZE(bridge_masks);i++) {
-		ret=rtl_fe_mask_read(&io,bridge_masks[i],fe->bridge_mask_saved[i]);
+		ret=rtl_fe_mask_read(fe,bridge_masks[i],fe->bridge_mask_saved[i]);
 		if(ret)return ret;
 	}
 
 	for(i=0;i<2;i++) {
-		ret=rtl_fe_classifier_read(&io,1024+4*i,fe->classifier_saved[i]);
+		ret=rtl_fe_classifier_read(fe,1024+4*i,fe->classifier_saved[i]);
 		if(ret)return ret;
 		for(side=0;side<4;side++) {
-			ret=fe_access(fe,0x1654,BIT(31)|(24+i)|(side<<6));
+			ret=fe_indirect(fe,RTL_NI_QM_PORT_MAP_CMD,BIT(31)|(24+i)|(side<<6));
 			if(ret)return ret;
-			fe->map_saved[i][side]=fe_read(fe,0x1658);
+			fe->map_saved[i][side]=fe_read(fe,RTL_NI_QM_PORT_MAP_DATA);
 		}
 	}
 	fe->prepared=true;
 
-	fe_write(fe,0x3218,fe_read(fe,0x3218)|BIT(16));
+	fe_write(fe,RTL_FE_CAM_DATA_AUX,fe_read(fe,RTL_FE_CAM_DATA_AUX)|BIT(16));
 
-	fe_write(fe,0x351c,fe_read(fe,0x351c)&~BIT(10));
-	rtl_fe_dma_tables(&io,lower_32_bits(fe->dma),(upper_32_bits(fe->dma)&255)|2);
-	ret=fe_access(fe,0x393c,1);
+	fe_write(fe,RTL_FE_CONTROL,fe_read(fe,RTL_FE_CONTROL)&~BIT(10));
+	rtl_fe_dma_tables(fe,lower_32_bits(fe->dma),(upper_32_bits(fe->dma)&255)|2);
+	ret=fe_indirect(fe,RTL_FE_SYNC_CMD,1);
 	if(ret)return ret;
 	rtl_fe_ipv6_mask(mask);
 
@@ -211,110 +109,109 @@ static int fe_prepare(struct rtl_fe *fe)
 	mask[2]&=~(BIT(30)|BIT(31));
 	mask[3]&=~(BIT(2)|BIT(3));
 	mask[2]&=~(BIT(25)|BIT(27));
-	ret=rtl_fe_mask_write(&io,63,mask);
+	ret=rtl_fe_mask_write(fe,63,mask);
 	if(ret)return ret;
 	rtl_fe_bridge_mask(mask);
-	ret=rtl_fe_mask_write(&io,61,mask);
+	ret=rtl_fe_mask_write(fe,61,mask);
 	if(ret)return ret;
 	rtl_fe_bridge_mask(mask);
 	rtl_fe_bits_set(mask,92,2,0);
 	rtl_fe_bits_set(mask,96,2,0);
-	ret=rtl_fe_mask_write(&io,59,mask);
+	ret=rtl_fe_mask_write(fe,59,mask);
 	if(ret)return ret;
 	rtl_fe_bits_set(mask,135,8,255);
 	rtl_fe_bits_set(mask,88,1,0);
-	ret=rtl_fe_mask_write(&io,57,mask);
+	ret=rtl_fe_mask_write(fe,57,mask);
 	if(ret)return ret;
-	fe_write(fe,0x3500,0x11);
-	fe_write(fe,0x3504,PPP_IP|PPP_IPV6<<16);
-	fe_write(fe,0x30a4,fe_read(fe,0x30a4)|BIT(31));
-	fe_write(fe,0x351c,(fe_read(fe,0x351c)&~(0x3fU<<4|0x3fU<<16|7U<<24))|BIT(31)|BIT(12)|32U<<4|16U<<16);
+	fe_write(fe,RTL_FE_PPP_PROTOCOL0,0x11);
+	fe_write(fe,RTL_FE_PPP_PROTOCOL1,PPP_IP|PPP_IPV6<<16);
+	fe_write(fe,RTL_FE_TABLE_CFG0,fe_read(fe,RTL_FE_TABLE_CFG0)|BIT(31));
+	fe_write(fe,RTL_FE_CONTROL,(fe_read(fe,RTL_FE_CONTROL)&~(0x3fU<<4|0x3fU<<16|7U<<24))|BIT(31)|BIT(12)|32U<<4|16U<<16);
 
-	fe_write(fe,0x3508,fe_read(fe,0x3508)|0x1f00);
+	fe_write(fe,RTL_FE_PPP_CONFIG,fe_read(fe,RTL_FE_PPP_CONFIG)|0x1f00);
 
-	fe_write(fe,0x30cc,(fe_read(fe,0x30cc)&~0xfffU)|0xf21);
+	fe_write(fe,RTL_FE_TABLE_CFG1,(fe_read(fe,RTL_FE_TABLE_CFG1)&~0xfffU)|0xf21);
 	for(i=0;i<2;i++) {
 		rtl_fe_classify_hash(cls,0,i?7:0);
 
 		if(!i)rtl_fe_bits_set(cls,208,1,0);
-		ret=rtl_fe_classifier_write(&io,1024+4*(i?0:1),cls);
+		ret=rtl_fe_classifier_write(fe,1024+4*(i?0:1),cls);
 		if(ret)return ret;
 		rtl_fe_ingress_lpb(lpb,i?7:0,16);
 		rtl_fe_bits_set(lpb,42,4,i?0:1);
-		for(side=0;side<3;side++)fe_write(fe,0x3414+i*12+side*4,lpb[side]);
+		for(side=0;side<3;side++)fe_write(fe,RTL_FE_LPB_TABLE(i, side),lpb[side]);
 		for(side=0;side<4;side++) {
-			fe_write(fe,0x1658,i?12:13);
-			ret=fe_access(fe,0x1654,BIT(31)|BIT(30)|(i?24:25)|(side<<6));
+			fe_write(fe,RTL_NI_QM_PORT_MAP_DATA,i?12:13);
+			ret=fe_indirect(fe,RTL_NI_QM_PORT_MAP_CMD,BIT(31)|BIT(30)|(i?24:25)|(side<<6));
 			if(ret)return ret;
 		}
 	}
-	fe_write(fe,0x3400,(fe_read(fe,0x3400)&~(BIT(0)|BIT(10)))|BIT(3)|BIT(2)|BIT(19));
-	fe_write(fe,0x3404,7|(25<<8)|(1<<14)|(24<<16)|(2<<22)|(3<<24));
-	fe_write(fe,0x2300,fe_read(fe,0x2300)|BIT(12)|BIT(13));
-	fe_write(fe,0x2304+12*12,0xff|(6<<16));
-	fe_write(fe,0x2304+13*12,0xff|(6<<16));
-	for(i=0;i<5;i++)fe_write(fe,0x394c+i*4,0);
-	fe_write(fe,0x3724,RTL_FE_ACTION_GROUPS|(3U<<25));
-	fe_write(fe,0x3704,63);
-	fe_write(fe,0x3708,61|BIT(8));
-	fe_write(fe,0x370c,59|(2U<<8));
-	fe_write(fe,0x3710,57|(3U<<8));
-	fe_write(fe,0x3700,4);
-	fe_write(fe,0x3860,0x020d0000);
-	fe_write(fe,0x3278,0x88a88100);
-	fe_write(fe,0x327c,0x92009100);
-	fe_write(fe,0x3280,0x77);
+	fe_write(fe,RTL_FE_LPB_CFG,(fe_read(fe,RTL_FE_LPB_CFG)&~(BIT(0)|BIT(10)))|BIT(3)|BIT(2)|BIT(19));
+	fe_write(fe,RTL_FE_LPB_PROFILE,7|(25<<8)|(1<<14)|(24<<16)|(2<<22)|(3<<24));
+	fe_write(fe,RTL_NI_L2TM_ES_CTRL,fe_read(fe,RTL_NI_L2TM_ES_CTRL)|BIT(12)|BIT(13));
+	fe_write(fe,RTL_NI_PORT_TABLE_ENTRY(12),0xff|(6<<16));
+	fe_write(fe,RTL_NI_PORT_TABLE_ENTRY(13),0xff|(6<<16));
+	for(i=0;i<5;i++)fe_write(fe,RTL_FE_ACTION_GROUP(i),0);
+	fe_write(fe,RTL_FE_ACTION_GROUP_CFG,RTL_FE_ACTION_GROUPS|(3U<<25));
+	fe_write(fe,RTL_FE_SWO_TUPLE,63);
+	fe_write(fe,RTL_FE_KEY_PROFILE(1),61|BIT(8));
+	fe_write(fe,RTL_FE_KEY_PROFILE(2),59|(2U<<8));
+	fe_write(fe,RTL_FE_KEY_PROFILE(3),57|(3U<<8));
+	fe_write(fe,RTL_FE_HASH_MODE,4);
+	fe_write(fe,RTL_FE_PARSER_CFG,0x020d0000);
+	fe_write(fe,RTL_FE_TPID0,0x88a88100);
+	fe_write(fe,RTL_FE_TPID1,0x92009100);
+	fe_write(fe,RTL_FE_TPID2,0x77);
 	for(i=0;i<3;i++) {
-		ret=rtl_fe_cam_protocol_get(&io,&fe->protocol_cam[i],i?8:2,
+		ret=rtl_fe_cam_protocol_get(fe,&fe->protocol_cam[i],i?8:2,
 			i==0?ETH_P_PPP_SES:i==1?PPP_IP:PPP_IPV6);
 		if(ret<0)return ret;
 		if(i)fe->ppp_protocol_ids[i-1]=ret;
 	}
 
-	fe_write(fe,0xa1e0,fe_read(fe,0xa1e0)|0x3ff);
-	rtl_fe_cache_start(&io);
-	fe_write(fe,0x351c,fe_read(fe,0x351c)|BIT(10));
+	fe_write(fe,RTL_NI_NITX_CONTROL,fe_read(fe,RTL_NI_NITX_CONTROL)|0x3fff);
+	rtl_fe_cache_start(fe);
+	fe_write(fe,RTL_FE_CONTROL,fe_read(fe,RTL_FE_CONTROL)|BIT(10));
 	return 0;
 }
 static int fe_restore(struct rtl_fe *fe)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	unsigned int i,side;
 	int ret;
 
 	if(!fe->prepared)return 0;
-	fe_write(fe,0x351c,fe_read(fe,0x351c)&~BIT(10));
-	fe_write(fe,0x38c4,0);
-	ret=fe_access(fe,0x393c,1);
+	fe_write(fe,RTL_FE_CONTROL,fe_read(fe,RTL_FE_CONTROL)&~BIT(10));
+	fe_write(fe,RTL_FE_HASH_ENABLE,0);
+	ret=fe_indirect(fe,RTL_FE_SYNC_CMD,1);
 	if(ret)return ret;
 	for(i=0;i<3;i++) {
-		ret=rtl_fe_cam_protocol_put(&io,&fe->protocol_cam[i]);
+		ret=rtl_fe_cam_protocol_put(fe,&fe->protocol_cam[i]);
 		if(ret)return ret;
 	}
 	for(i=0;i<2;i++) {
 		for(side=0;side<4;side++) {
-			fe_write(fe,0x1658,fe->map_saved[i][side]);
-			ret=fe_access(fe,0x1654,BIT(31)|BIT(30)|(24+i)|(side<<6));
+			fe_write(fe,RTL_NI_QM_PORT_MAP_DATA,fe->map_saved[i][side]);
+			ret=fe_indirect(fe,RTL_NI_QM_PORT_MAP_CMD,BIT(31)|BIT(30)|(24+i)|(side<<6));
 			if(ret)return ret;
 		}
-		ret=rtl_fe_classifier_write(&io,1024+4*i,fe->classifier_saved[i]);
+		ret=rtl_fe_classifier_write(fe,1024+4*i,fe->classifier_saved[i]);
 		if(ret)return ret;
 	}
-	ret=rtl_fe_mask_write(&io,63,fe->mask_saved);
+	ret=rtl_fe_mask_write(fe,63,fe->mask_saved);
 	if(ret)return ret;
 	for(i=0;i<3;i++) {
-		ret=rtl_fe_mask_write(&io,61-2*i,fe->bridge_mask_saved[i]);
+		ret=rtl_fe_mask_write(fe,61-2*i,fe->bridge_mask_saved[i]);
 		if(ret)return ret;
 	}
 	for(i=0;i<ARRAY_SIZE(fe_registers);i++)fe_write(fe,fe_registers[i],fe->saved[i]);
-	for(i=0;i<FE_LAN_PORTS;i++)fe_write(fe,FE_LAN_RX_CTRL(i),fe->lan_saved[i]);
-	fe_read(fe,0x383c);
+	for(i=0;i<FE_LAN_PORTS;i++)fe_write(fe,RTL_NI_LAN_RX_CTRL(i),fe->lan_saved[i]);
+	fe_write(fe,RTL_NI_XGE_BYPASS_CFG,fe->xge_saved);
+	fe_read(fe,RTL_FE_HASH_BASE_LOW);
 	fe->prepared=false;
 	return 0;
 }
 static int fe_source_get(struct rtl_fe *fe,const u8 *address,unsigned int *index)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	unsigned int i,words[5]={};
 	int ret;
 
@@ -326,11 +223,11 @@ static int fe_source_get(struct rtl_fe *fe,const u8 *address,unsigned int *index
 		}
 	for(i=0;i<FE_SOURCE_MACS;i++)if(!fe->source_macs[i].users)break;
 	if(i==FE_SOURCE_MACS)return -ENOSPC;
-	ret=rtl_fe_source_mac_read(&io,i,fe->source_macs[i].saved);
+	ret=rtl_fe_source_mac_read(fe,i,fe->source_macs[i].saved);
 	if(ret)return ret;
 	for(unsigned int byte=0;byte<ETH_ALEN;byte++)rtl_fe_bits_set(words,(5-byte)*8,8,address[byte]);
 	words[1]|=BIT(16);
-	ret=rtl_fe_source_mac_write(&io,i,words);
+	ret=rtl_fe_source_mac_write(fe,i,words);
 	if(ret)return ret;
 	ether_addr_copy(fe->source_macs[i].address,address);
 	fe->source_macs[i].users=1;
@@ -339,11 +236,10 @@ static int fe_source_get(struct rtl_fe *fe,const u8 *address,unsigned int *index
 }
 static int fe_source_put(struct rtl_fe *fe,unsigned int index)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	int ret;
 
 	if(fe->source_macs[index].users>1){fe->source_macs[index].users--;return 0;}
-	ret=rtl_fe_source_mac_write(&io,index,fe->source_macs[index].saved);
+	ret=rtl_fe_source_mac_write(fe,index,fe->source_macs[index].saved);
 	if(!ret)fe->source_macs[index].users=0;
 	return ret;
 }
@@ -366,9 +262,9 @@ static int fe_interface_get(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 	}
 	interface=&fe->interfaces[index];
 	if(!interface->users) {
-		ret=fe_access(fe,0x3000,BIT(31)|index);
+		ret=fe_indirect(fe,RTL_FE_INTERFACE_CMD,BIT(31)|index);
 		if(ret)return ret;
-		interface->saved=fe_read(fe,0x3004);
+		interface->saved=fe_read(fe,RTL_FE_INTERFACE_DATA);
 		interface->source_mac=flow->source_mac;
 		interface->pppoe=flow->pppoe;
 		__set_bit(index,fe->counters);
@@ -380,8 +276,8 @@ static int fe_interface_get(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 	flow->interface_owned=true;
 	if(interface->users==1) {
 
-		fe_write(fe,0x3004,BIT(23)|BIT(18)|((flow->source_mac+1)<<19)|flow->pppoe);
-		return fe_access(fe,0x3000,BIT(31)|BIT(30)|index);
+		fe_write(fe,RTL_FE_INTERFACE_DATA,BIT(23)|BIT(18)|((flow->source_mac+1)<<19)|flow->pppoe);
+		return fe_indirect(fe,RTL_FE_INTERFACE_CMD,BIT(31)|BIT(30)|index);
 	}
 	return 0;
 }
@@ -391,8 +287,8 @@ static int fe_interface_put(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 	int ret;
 
 	if(interface->users==1) {
-		fe_write(fe,0x3004,interface->saved);
-		ret=fe_access(fe,0x3000,BIT(31)|BIT(30)|flow->counter);
+		fe_write(fe,RTL_FE_INTERFACE_DATA,interface->saved);
+		ret=fe_indirect(fe,RTL_FE_INTERFACE_CMD,BIT(31)|BIT(30)|flow->counter);
 		if(ret)return ret;
 		__clear_bit(flow->counter,fe->counters);
 	}
@@ -433,7 +329,6 @@ static void fe_mtu_put(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 }
 static int fe_destination_get(struct rtl_fe *fe,struct rtl_fe_flow *flow,const u8 *address)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	struct rtl_fe_flow *other;
 	unsigned int words[4],result;
 	int ret;
@@ -448,19 +343,19 @@ static int fe_destination_get(struct rtl_fe *fe,struct rtl_fe_flow *flow,const u
 			return 0;
 		}
 	rtl_fe_fdb_key(words,address);
-	ret=rtl_fe_fdb_command(&io,4,words,&result);
+	ret=rtl_fe_fdb_command(fe,4,words,&result);
 	if(ret)return ret;
 	flow->destination_created=(result&15)!=5;
 	if(!flow->destination_created)memcpy(flow->destination_saved,words,sizeof(words));
 
 	if(flow->destination_created)rtl_fe_fdb_key(words,address);
 	else words[0]|=BIT(9)|BIT(19)|BIT(20)|BIT(21);
-	ret=rtl_fe_fdb_command(&io,0x45,words,&result);
+	ret=rtl_fe_fdb_command(fe,0x45,words,&result);
 	if(ret)return ret;
 	if((result&15)!=5)return -ENOSPC;
 	flow->destination_owned=true;
 	rtl_fe_fdb_key(words,address);
-	ret=rtl_fe_fdb_command(&io,4,words,&result);
+	ret=rtl_fe_fdb_command(fe,4,words,&result);
 	if(ret)return ret;
 	if((result&15)!=5)return -EIO;
 	flow->destination_index=(result>>4)&0x1fff;
@@ -468,7 +363,6 @@ static int fe_destination_get(struct rtl_fe *fe,struct rtl_fe_flow *flow,const u
 }
 static int fe_destination_put(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	struct rtl_fe_flow *other;
 	unsigned int words[4],result;
 
@@ -476,16 +370,16 @@ static int fe_destination_put(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 		if(other!=flow && other->destination_owned && ether_addr_equal(other->destination,flow->destination))return 0;
 	if(flow->destination_created) {
 		rtl_fe_fdb_key(words,flow->destination);
-		return rtl_fe_fdb_command(&io,0x85,words,&result);
+		return rtl_fe_fdb_command(fe,0x85,words,&result);
 	}
 	memcpy(words,flow->destination_saved,sizeof(words));
-	return rtl_fe_fdb_command(&io,0x45,words,&result);
+	return rtl_fe_fdb_command(fe,0x45,words,&result);
 }
 
 struct rtl_fe_rule {
 	struct rtl_fe_ipv4_key key;
 	struct rtl_fe_ipv6_key key6;
-	bool ipv6, bridge;
+	enum rtl_fe_rule_kind kind;
 	bool vlan_exact;
 	u16 ingress_tci[2];
 	u8 ppp_protocol_slot;
@@ -559,7 +453,7 @@ static int fe_parse_bridge(struct rtl_fe_port *port,struct flow_rule *rule,struc
 	for(i=0;i<ETH_ALEN;i++)
 		if(ethernet.mask->src[i]!=255 || ethernet.mask->dst[i]!=255)return -EOPNOTSUPP;
 	if(!is_valid_ether_addr(ethernet.key->src) || !is_valid_ether_addr(ethernet.key->dst))return -EINVAL;
-	data->bridge=true;data->input=port;
+	data->kind=RTL_FE_RULE_BRIDGE;data->input=port;
 	data->ethernet_protocol=ntohs(basic.key->n_proto);
 	data->key=(struct rtl_fe_ipv4_key){.ingress=port->source,.llid=port->llid,
 		.mask=61};
@@ -662,8 +556,8 @@ static int fe_parse(struct rtl_fe_port *port,struct flow_cls_offload *cls,struct
 		else return -EOPNOTSUPP;
 		data->pppoe_input=true;data->pppoe_session=ntohs(pppoe.key->session_id);
 	}
-	data->ipv6=protocol==htons(ETH_P_IPV6);
-	if((protocol!=htons(ETH_P_IP) && !data->ipv6) || basic.mask->n_proto!=htons(0xffff) ||
+	data->kind=protocol==htons(ETH_P_IPV6)?RTL_FE_RULE_IPV6:RTL_FE_RULE_IPV4;
+	if((protocol!=htons(ETH_P_IP) && data->kind!=RTL_FE_RULE_IPV6) || basic.mask->n_proto!=htons(0xffff) ||
 				basic.mask->ip_proto!=255 || (basic.key->ip_proto!=IPPROTO_TCP && basic.key->ip_proto!=IPPROTO_UDP))
 		return -EOPNOTSUPP;
 	if(flow_rule_match_key(rule,FLOW_DISSECTOR_KEY_ENC_CONTROL))return -EOPNOTSUPP;
@@ -687,7 +581,7 @@ static int fe_parse(struct rtl_fe_port *port,struct flow_cls_offload *cls,struct
 	data->key=(struct rtl_fe_ipv4_key){
 		.source_port=ntohs(ports.key->src),.destination_port=ntohs(ports.key->dst),
 		.protocol=basic.key->ip_proto,.ingress=port->source,.llid=port->llid,.mask=63};
-	if(data->ipv6) {
+	if(data->kind==RTL_FE_RULE_IPV6) {
 		if(!flow_rule_match_key(rule,FLOW_DISSECTOR_KEY_IPV6_ADDRS))return -EOPNOTSUPP;
 		flow_rule_match_ipv6_addrs(rule,&addresses6);
 		data->key6=(struct rtl_fe_ipv6_key){.source_port=data->key.source_port,
@@ -740,7 +634,7 @@ static int fe_parse(struct rtl_fe_port *port,struct flow_cls_offload *cls,struct
 				value=get_unaligned((u32 *)(ethernet+offset));
 				put_unaligned((value&act->mangle.mask)|act->mangle.val,(u32 *)(ethernet+offset));
 			} else if(act->mangle.htype==FLOW_ACT_MANGLE_HDR_TYPE_IP4) {
-				if(data->ipv6)return -EOPNOTSUPP;
+				if(data->kind==RTL_FE_RULE_IPV6)return -EOPNOTSUPP;
 				if(act->mangle.mask)return -EOPNOTSUPP;
 				if(offset==offsetof(struct iphdr,saddr))memcpy(&new_source,&act->mangle.val,4);
 				else if(offset==offsetof(struct iphdr,daddr))memcpy(&new_destination,&act->mangle.val,4);
@@ -752,7 +646,7 @@ static int fe_parse(struct rtl_fe_port *port,struct flow_cls_offload *cls,struct
 				value=(value&act->mangle.mask)|act->mangle.val;
 				memcpy(pair,&value,4);
 				new_sport=pair[0];new_dport=pair[1];
-				if(data->ipv6 && (new_sport!=ports.key->src || new_dport!=ports.key->dst))return -EOPNOTSUPP;
+				if(data->kind==RTL_FE_RULE_IPV6 && (new_sport!=ports.key->src || new_dport!=ports.key->dst))return -EOPNOTSUPP;
 			} else return -EOPNOTSUPP;
 			break;
 		default:return -EOPNOTSUPP;
@@ -763,8 +657,8 @@ static int fe_parse(struct rtl_fe_port *port,struct flow_cls_offload *cls,struct
 	ether_addr_copy(data->destination,ethernet);
 	ether_addr_copy(data->source,ethernet+ETH_ALEN);
 	if(!is_valid_ether_addr(data->source) || !is_valid_ether_addr(data->destination))return -EINVAL;
-	source_changed=!data->ipv6 && (new_source!=addresses.key->src || new_sport!=ports.key->src);
-	destination_changed=!data->ipv6 && (new_destination!=addresses.key->dst || new_dport!=ports.key->dst);
+	source_changed=data->kind!=RTL_FE_RULE_IPV6 && (new_source!=addresses.key->src || new_sport!=ports.key->src);
+	destination_changed=data->kind!=RTL_FE_RULE_IPV6 && (new_destination!=addresses.key->dst || new_dport!=ports.key->dst);
 	if(source_changed && destination_changed)return -EOPNOTSUPP;
 
 	if(vlan_changed)
@@ -804,14 +698,13 @@ itu_paths:
 
 static int fe_delete(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	int ret;
 
 	flow->deleting=true;
 	if(flow->published) {
-		ret=rtl_fe_main_age(&io,flow->hash_index,0);
+		ret=rtl_fe_main_age(fe,flow->hash_index,0);
 		if(ret)goto retry;
-		ret=rtl_fe_cache_command(&io,flow->hash_index,flow->crc16,1);
+		ret=rtl_fe_cache_command(fe,flow->hash_index,flow->crc16,1);
 		if(ret)goto retry;
 		flow->published=false;
 	}
@@ -834,6 +727,8 @@ static int fe_delete(struct rtl_fe *fe,struct rtl_fe_flow *flow)
 	}
 	if(flow->mtu_owned)fe_mtu_put(fe,flow);
 	__clear_bit(flow->hash_index,fe->hashes);
+	if(flow->learned)fe_bridge_flow_removed(fe);
+	if(flow->hashed)rhashtable_remove_fast(&fe->cookies,&flow->node,fe_flow_params);
 	list_del(&flow->list);
 	if(flow->installed)fe->deletes++;
 	kfree(flow);
@@ -856,7 +751,6 @@ static void fe_cleanup_work(struct work_struct *work)
 static int fe_install(struct rtl_fe_port *port,struct rtl_fe_rule data,unsigned long cookie)
 {
 	struct rtl_fe *fe=port->fe;
-	struct rtl_dq_io io=fe_io(fe);
 	struct rtl_fe_flow *flow;
 	unsigned int words[23],action[8],crc32,index,start,counters[7],i;
 	u16 crc16;
@@ -866,9 +760,9 @@ static int fe_install(struct rtl_fe_port *port,struct rtl_fe_rule data,unsigned 
 	if(!fe->enabled || !netif_running(data.input->netdev) || !netif_running(data.output->netdev) ||
 				!netif_carrier_ok(data.input->netdev) || !netif_carrier_ok(data.output->netdev))return -EAGAIN;
 	if(fe_flow(fe,cookie))return -EEXIST;
-	if(data.bridge)rtl_fe_bridge_key(words,data.source,data.destination,data.ethernet_protocol,
+	if(data.kind==RTL_FE_RULE_BRIDGE)rtl_fe_bridge_key(words,data.source,data.destination,data.ethernet_protocol,
 		data.key.ingress,data.key.llid,data.key.mask);
-	else if(data.ipv6)rtl_fe_ipv6_key(words,&data.key6);
+	else if(data.kind==RTL_FE_RULE_IPV6)rtl_fe_ipv6_key(words,&data.key6);
 	else rtl_fe_ipv4_key(words,&data.key);
 	rtl_fe_vlan_key(words,data.vlan,data.vlan_count);
 	if(data.vlan_exact)for(i=0;i<data.vlan_count;i++) {
@@ -895,16 +789,18 @@ static int fe_install(struct rtl_fe_port *port,struct rtl_fe_rule data,unsigned 
 	flow->ingress_pol=data.key.llid;
 	flow->ethernet_protocol=data.ethernet_protocol;
 	ether_addr_copy(flow->ethernet_source,data.source);
-	flow->protocol=data.key.protocol;flow->ipv6=data.ipv6;
-	flow->bridge=data.bridge;
+	flow->protocol=data.key.protocol;flow->kind=data.kind;
 	flow->source_port=data.key.source_port;flow->destination_port=data.key.destination_port;
-	for(i=0;i<(data.ipv6?4:1);i++) {
-		put_unaligned_be32(data.ipv6?data.key6.source[i]:data.key.source,flow->ip_source+i*4);
-		put_unaligned_be32(data.ipv6?data.key6.destination[i]:data.key.destination,flow->ip_destination+i*4);
+	for(i=0;i<(data.kind==RTL_FE_RULE_IPV6?4:1);i++) {
+		put_unaligned_be32(data.kind==RTL_FE_RULE_IPV6?data.key6.source[i]:data.key.source,flow->ip_source+i*4);
+		put_unaligned_be32(data.kind==RTL_FE_RULE_IPV6?data.key6.destination[i]:data.key.destination,flow->ip_destination+i*4);
 	}
 	__set_bit(index,fe->hashes);
+	ret=rhashtable_insert_fast(&fe->cookies,&flow->node,fe_flow_params);
+	if(ret)goto rollback;
+	flow->hashed=true;
 	list_add_tail(&flow->list,&fe->flows);
-	if(!data.bridge) {
+	if(data.kind!=RTL_FE_RULE_BRIDGE) {
 		ret=fe_source_get(fe,data.source,&flow->source_mac);
 		if(ret)goto rollback;
 		flow->source_owned=true;
@@ -919,7 +815,7 @@ static int fe_install(struct rtl_fe_port *port,struct rtl_fe_rule data,unsigned 
 		data.action.mtu_set=1;data.action.mtu_index=flow->mtu_index;
 	}
 	if(flow->counted) {
-		ret=rtl_fe_tx_counter_read(&io,flow->counter,counters);
+		ret=rtl_fe_tx_counter_read(fe,flow->counter,counters);
 		if(ret)goto rollback;
 		flow->bytes=(u64)counters[1]<<32|counters[0];flow->packets=counters[2]+counters[3];
 	}
@@ -931,7 +827,7 @@ static int fe_install(struct rtl_fe_port *port,struct rtl_fe_rule data,unsigned 
 	memcpy(fe->memory+RTL_FE_ACTION_OFFSET+index*RTL_FE_ACTION_BYTES,action,sizeof(action));
 	dma_wmb();
 	flow->published=true;
-	ret=rtl_fe_main_age(&io,index,1);
+	ret=rtl_fe_main_age(fe,index,1);
 	if(ret)goto rollback;
 	flow->installed=true;
 	fe->installs++;
@@ -950,7 +846,6 @@ static int fe_replace(struct rtl_fe_port *port,struct flow_cls_offload *cls)
 }
 static int fe_stats(struct rtl_fe *fe,struct rtl_fe_flow *flow,struct flow_cls_offload *cls)
 {
-	struct rtl_dq_io io=fe_io(fe);
 	unsigned int words[7],age;
 	u64 bytes;
 	u64 byte_delta;
@@ -959,10 +854,10 @@ static int fe_stats(struct rtl_fe *fe,struct rtl_fe_flow *flow,struct flow_cls_o
 	int ret;
 
 	if(!flow->published)return -ENOENT;
-	ret=rtl_fe_main_age_read(&io,flow->hash_index,&age);
+	ret=rtl_fe_main_age_read(fe,flow->hash_index,&age);
 	if(ret)return ret;
 	if(age>1) {
-		ret=rtl_fe_main_age(&io,flow->hash_index,1);
+		ret=rtl_fe_main_age(fe,flow->hash_index,1);
 		if(ret)return ret;
 		flow->lastused=jiffies;
 	}
@@ -970,7 +865,7 @@ static int fe_stats(struct rtl_fe *fe,struct rtl_fe_flow *flow,struct flow_cls_o
 		flow_stats_update(&cls->stats,0,0,0,flow->lastused,FLOW_ACTION_HW_STATS_DELAYED);
 		return 0;
 	}
-	ret=rtl_fe_tx_counter_read(&io,flow->counter,words);
+	ret=rtl_fe_tx_counter_read(fe,flow->counter,words);
 	if(ret)return ret;
 	bytes=(u64)words[1]<<32|words[0];packets=words[2]+words[3];
 	if(bytes!=flow->bytes || packets!=flow->packets)flow->lastused=jiffies;
@@ -1067,7 +962,7 @@ unlock:
 	return ret;
 }
 
-struct rtl_fe *rtl_fe_allocate(struct device *device,void __iomem *registers)
+struct rtl_fe *rtl_fe_allocate(struct device *device,struct regmap *regs)
 {
 	void __iomem *reo=devm_platform_ioremap_resource_byname(to_platform_device(device),"l3fe-axi-reorder");
 	struct rtl_fe *fe;
@@ -1076,10 +971,12 @@ struct rtl_fe *rtl_fe_allocate(struct device *device,void __iomem *registers)
 	if(IS_ERR(reo))return ERR_CAST(reo);
 	fe=kzalloc(sizeof(*fe),GFP_KERNEL);
 	if(!fe)return ERR_PTR(-ENOMEM);
-	fe->device=device;fe->registers=registers;
+	fe->device=device;fe->regs=regs;
 	mutex_init(&fe->lock);
 	INIT_DELAYED_WORK(&fe->cleanup_work,fe_cleanup_work);
 	INIT_LIST_HEAD(&fe->ports);INIT_LIST_HEAD(&fe->flows);INIT_LIST_HEAD(&fe->blocks);
+	if(rhashtable_init(&fe->cookies,&fe_flow_params))return ERR_PTR(-ENOMEM);
+	fe_debugfs_init(fe);
 	fe->memory=dma_alloc_coherent(device,RTL_FE_MEMORY_BYTES,&fe->dma,GFP_KERNEL);
 	if(!fe->memory){kfree(fe);return ERR_PTR(-ENOMEM);}
 	defaults=fe->memory+RTL_FE_DEFAULT_OFFSET;
@@ -1093,12 +990,12 @@ struct rtl_fe *rtl_fe_allocate(struct device *device,void __iomem *registers)
 		return ERR_PTR(ret);
 	}
 
-	writel(15,reo+0x80);
-	writel(BIT(31)|8,reo+0x84);
-	writel(BIT(28),reo+0x88);
-	writel(BIT(28),reo+0x8c);
-	writel(BIT(31)|9,reo+0x90);
-	readl(reo+0x90);
+	writel(15,reo+RTL_FE_REORDER_CTRL);
+	writel(BIT(31)|8,reo+RTL_FE_REORDER_USER);
+	writel(BIT(28),reo+RTL_FE_REORDER_ATTR);
+	writel(BIT(28),reo+RTL_FE_REORDER_ATTR2);
+	writel(BIT(31)|9,reo+RTL_FE_REORDER_ID);
+	readl(reo+RTL_FE_REORDER_ID);
 	return fe;
 }
 int rtl_fe_add_port(struct rtl_fe *fe,struct net_device *netdev,unsigned int source,
@@ -1194,7 +1091,7 @@ static int fe_disable_locked(struct rtl_fe *fe)
 
 	fe->enabled=false;
 	if(fe->prepared) {
-		for(i=0;i<FE_LAN_PORTS;i++)fe_write(fe,FE_LAN_RX_CTRL(i),fe->lan_saved[i]);
+		for(i=0;i<FE_LAN_PORTS;i++)fe_write(fe,RTL_NI_LAN_RX_CTRL(i),fe->lan_saved[i]);
 		usleep_range(1000,2000);
 		list_for_each_entry_safe(flow,next,&fe->flows,list) {
 			ret=fe_delete(fe,flow);
@@ -1207,6 +1104,7 @@ static int fe_disable_locked(struct rtl_fe *fe)
 }
 int rtl_fe_enable(struct rtl_fe *fe)
 {
+	struct rtl_fe_port *port;
 	unsigned int i;
 	int ret;
 
@@ -1222,7 +1120,14 @@ int rtl_fe_enable(struct rtl_fe *fe)
 	if(ret){fe_restore(fe);goto unlock;}
 
 	for(i=0;i<FE_LAN_PORTS;i++)
-		fe_write(fe,FE_LAN_RX_CTRL(i),(fe_read(fe,FE_LAN_RX_CTRL(i))&~(63U<<16))|(25U<<16));
+		fe_write(fe,RTL_NI_LAN_RX_CTRL(i),(fe_read(fe,RTL_NI_LAN_RX_CTRL(i))&~(63U<<16))|(25U<<16));
+	list_for_each_entry(port,&fe->ports,list)
+		if(port->source==6) {
+			fe_write(fe,RTL_NI_XGE_BYPASS_CFG,
+				 (fe_read(fe,RTL_NI_XGE_BYPASS_CFG)&~RTL_NI_XGE_BYPASS_FIELDS)|
+				 (fe->xge_saved&BIT(12))|(25U<<4));
+			break;
+		}
 	fe->enabled=true;
 unlock:
 	fe->error=ret;
@@ -1250,6 +1155,7 @@ void rtl_fe_free(struct rtl_fe *fe)
 	rtl_fe_disable(fe);
 	cancel_delayed_work_sync(&fe->cleanup_work);
 	list_for_each_entry_safe(flow,flow_next,&fe->flows,list){list_del(&flow->list);kfree(flow);}
+	rhashtable_destroy(&fe->cookies);
 	list_for_each_entry_safe(port,next,&fe->ports,list){list_del(&port->list);kfree(port);}
 	dma_free_coherent(fe->device,RTL_FE_MEMORY_BYTES,fe->memory,fe->dma);
 	kvfree(fe->itu_paths);
@@ -1266,7 +1172,7 @@ ssize_t rtl_fe_state(struct rtl_fe *fe,char *buffer)
 	list_for_each_entry(flow,&fe->flows,list)if(flow->published) {
 		flows++;
 		counted+=flow->counted;
-		bridged+=flow->bridge;learned+=flow->learned;
+		bridged+=(flow->kind==RTL_FE_RULE_BRIDGE);learned+=flow->learned;
 	}
 	length=sysfs_emit(buffer,"available=1 enabled=%u prepared=%u error=%d flows=%u hash_entries=%u counter_slots=%u counted_flows=%u activity_flows=%u installs=%llu deletes=%llu rejected=%llu bridge_rules=%u learned_bridge_rules=%u\n",
 		fe->enabled,fe->prepared,fe->error,flows,RTL_FE_HASH_ENTRIES,
@@ -1276,3 +1182,86 @@ ssize_t rtl_fe_state(struct rtl_fe *fe,char *buffer)
 }
 
 #include "rtl9617c-fe-bridge.h"
+
+#ifdef CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+
+static struct dentry *fe_debugfs_root;
+static struct dentry *fe_debugfs_parent;
+
+static int fe_debugfs_flows_show(struct seq_file *s,void *unused)
+{
+	struct rtl_fe *fe=s->private;
+	struct rtl_fe_flow *flow;
+	const char *kind[]={"ipv4","ipv6","bridge"};
+
+	mutex_lock(&fe->lock);
+	list_for_each_entry(flow,&fe->flows,list)
+		seq_printf(s,"%s cookie=%lx in=%s out=%s hash=%u counter=%u packets=%u bytes=%llu learned=%u deleting=%u\n",
+			kind[flow->kind],flow->cookie,
+			flow->input->netdev->name,flow->output->netdev->name,
+			flow->hash_index,flow->counter,flow->packets,flow->bytes,
+			flow->learned,flow->deleting);
+	mutex_unlock(&fe->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(fe_debugfs_flows);
+
+static int fe_debugfs_resources_show(struct seq_file *s,void *unused)
+{
+	struct rtl_fe *fe=s->private;
+	unsigned int i,source=0,interface=0,mtu=0;
+
+	mutex_lock(&fe->lock);
+	for(i=0;i<FE_SOURCE_MACS;i++)source+=!!fe->source_macs[i].users;
+	for(i=0;i<FE_INTERFACES;i++)interface+=!!fe->interfaces[i].users;
+	for(i=0;i<16;i++)mtu+=!!fe->mtus[i].users;
+	seq_printf(s,"source_mac=%u/%u\n",source,FE_SOURCE_MACS);
+	seq_printf(s,"interface=%u/%u\n",interface,FE_INTERFACES);
+	seq_printf(s,"mtu=%u/16\n",mtu);
+	seq_printf(s,"hash=%u/%u\n",bitmap_weight(fe->hashes,RTL_FE_HASH_ENTRIES),RTL_FE_HASH_ENTRIES);
+	seq_printf(s,"counted=%u/%u\n",bitmap_weight(fe->counters,FE_INTERFACES),FE_COUNTERS);
+	mutex_unlock(&fe->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(fe_debugfs_resources);
+
+static int fe_debugfs_bridge_show(struct seq_file *s,void *unused)
+{
+	struct rtl_fe *fe=s->private;
+	struct rtl_fe_bridge *bridge=fe->bridge;
+
+	if(!bridge)return 0;
+	seq_printf(s,"epoch=%d pending=%u drops=%llu learned=%u max=%u\n",
+		atomic_read(&bridge->epoch),
+		(bridge->write+FE_BRIDGE_PENDING-bridge->read)%FE_BRIDGE_PENDING,
+		bridge->drops,bridge->learned_count,fe_learned_max);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(fe_debugfs_bridge);
+
+void fe_debugfs_init(struct rtl_fe *fe)
+{
+	fe_debugfs_parent=debugfs_create_dir("rtl9617c-ni",NULL);
+	if(IS_ERR_OR_NULL(fe_debugfs_parent))return;
+	fe_debugfs_root=debugfs_create_dir("fe",fe_debugfs_parent);
+	if(IS_ERR_OR_NULL(fe_debugfs_root))return;
+	debugfs_create_file("flows",0400,fe_debugfs_root,fe,&fe_debugfs_flows_fops);
+	debugfs_create_file("resources",0400,fe_debugfs_root,fe,&fe_debugfs_resources_fops);
+	debugfs_create_file("bridge",0400,fe_debugfs_root,fe,&fe_debugfs_bridge_fops);
+}
+
+void fe_debugfs_exit(void)
+{
+	debugfs_remove_recursive(fe_debugfs_parent);
+	fe_debugfs_parent=NULL;fe_debugfs_root=NULL;
+}
+#else
+void fe_debugfs_init(struct rtl_fe *fe)
+{
+}
+
+void fe_debugfs_exit(void)
+{
+}
+#endif

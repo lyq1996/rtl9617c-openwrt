@@ -8,32 +8,23 @@
 #include <linux/rcupdate.h>
 #include <linux/unaligned.h>
 #include "rtl9617c-qm.h"
+#include "rtl9617c-ni-regs.h"
+#include "rtl9617c-fe-regs.h"
 #include "rtl9617c-rx-checksum.h"
 
 #define EQ_ID 4
-#define EQ_CFG (0x61e8 + EQ_ID * 20)
-#define EQ_PROFILE (0x6128 + EQ_ID * 4)
-#define RMU_CTRL 0x6104
-#define ES_CTRL 0x6108
-#define EPP_READ 0x7100
-#define EPP_WRITE 0x7000
-#define EPP_BASE 0x7200
-#define CPU_PUSH 0x636c
-#define CPU_READY 0x6368
-#define CB_CTRL 0x950c
+#define EQ_CFG (RTL_NI_QM_EQ_CFG(EQ_ID))
+#define EQ_PROFILE (RTL_NI_QM_EQ_PROFILE(EQ_ID))
 
 static int rtl_qm_indirect(struct rtl_qm_rx *rx, unsigned int reg, u32 value)
 {
-	u32 status;
-
-	writel(value, rx->ni + reg);
-	return readl_poll_timeout(rx->ni + reg, status, !(status & BIT(31)), 1, 100000);
+	return rtl9617c_ni_indirect(rx->regs, reg, value, RTL_NI_INDIRECT_BUSY);
 }
 
 static int rtl_qm_attribute(struct rtl_qm_rx *rx, unsigned int entry, u32 value)
 {
-	writel(value, rx->ni + 0x66ac);
-	return rtl_qm_indirect(rx, 0x66a4, BIT(31) | BIT(30) | entry);
+	rtl_ni_write(rx->regs, RTL_NI_QM_ATTRIBUTE_DATA, value);
+	return rtl_qm_indirect(rx, RTL_NI_QM_ATTRIBUTE_CMD, BIT(31) | BIT(30) | entry);
 }
 
 static int rtl_qm_pon_destination_map(struct rtl_qm_rx *rx)
@@ -43,8 +34,8 @@ static int rtl_qm_pon_destination_map(struct rtl_qm_rx *rx)
 
 	for (flags = 0; flags < 256; flags += 64)
 		for (port = 32; port < 64; port++) {
-			writel(8, rx->ni + 0x1658);
-			ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | flags | port);
+			rtl_ni_write(rx->regs, RTL_NI_QM_PORT_MAP_DATA, 8);
+			ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | flags | port);
 			if (ret)
 				return ret;
 		}
@@ -56,14 +47,14 @@ static int rtl_qm_push(struct rtl_qm_rx *rx, u32 address, unsigned int eqid)
 	u32 status;
 	int ret;
 
-	ret = readl_poll_timeout_atomic(rx->ni + 0x6328 + eqid * 4, status,
+	ret = regmap_read_poll_timeout_atomic(rx->regs, RTL_NI_QM_EQ_FREE(eqid), status,
 				       status & GENMASK(13, 0), 1, 10000);
 	if (ret)
 		return ret;
-	ret = readl_poll_timeout_atomic(rx->ni + CPU_READY, status, status & BIT(31), 1, 10000);
+	ret = regmap_read_poll_timeout_atomic(rx->regs, RTL_NI_QM_CPU_READY, status, status & BIT(31), 1, 10000);
 	if (ret)
 		return ret;
-	writel(address | eqid, rx->ni + CPU_PUSH);
+	rtl_ni_write(rx->regs, RTL_NI_QM_CPU_PUSH, address | eqid);
 	return 0;
 }
 
@@ -71,10 +62,10 @@ static int rtl_qm_try_push(void *context, unsigned int address, unsigned int eqi
 {
 	struct rtl_qm_rx *rx = context;
 
-	if (!(readl(rx->ni + 0x6328 + eqid * 4) & GENMASK(13, 0)) ||
-	    !(readl(rx->ni + CPU_READY) & BIT(31)))
+	if (!(rtl_ni_read(rx->regs, RTL_NI_QM_EQ_FREE(eqid)) & GENMASK(13, 0)) ||
+	    !(rtl_ni_read(rx->regs, RTL_NI_QM_CPU_READY) & BIT(31)))
 		return -EAGAIN;
-	writel(address | eqid, rx->ni + CPU_PUSH);
+	rtl_ni_write(rx->regs, RTL_NI_QM_CPU_PUSH, address | eqid);
 	return 0;
 }
 
@@ -92,73 +83,73 @@ static int rtl_qm_ingress(struct rtl_qm_rx *rx, unsigned int port)
 		port = 6;
 
 	for (i = 0; i < 256; i += 64) {
-		writel(i & 64 ? 8 : port, rx->ni + 0x1658);
-		ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | i | port);
+		rtl_ni_write(rx->regs, RTL_NI_QM_PORT_MAP_DATA, i & 64 ? 8 : port);
+		ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | i | port);
 		if (ret)
 			return ret;
 	}
-	writel(port, rx->ni + 0x11e0);
-	ret = rtl_qm_indirect(rx, 0x11dc, BIT(31) | BIT(30) | port);
+	rtl_ni_write(rx->regs, RTL_NI_QM_ILPB_DATA, port);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_ILPB_CMD, BIT(31) | BIT(30) | port);
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(ilpb); i++)
-		writel(ilpb[i], rx->ni + 0x11f8 - 4 * i);
-	ret = rtl_qm_indirect(rx, 0x11e4, BIT(31) | BIT(30) | port);
+		rtl_ni_write(rx->regs, RTL_NI_QM_ILPB_WORDS - 4 * i, ilpb[i]);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_ILPB_APPLY_CMD, BIT(31) | BIT(30) | port);
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(key); i++)
-		writel(key[i], rx->ni + 0x1b40 - 4 * i);
-	ret = rtl_qm_indirect(rx, 0x1b0c, BIT(31) | BIT(30));
+		rtl_ni_write(rx->regs, RTL_NI_QM_KEY_WORDS - 4 * i, key[i]);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_KEY_CMD, BIT(31) | BIT(30));
 	if (ret)
 		return ret;
 	for (i = 0; i < ARRAY_SIZE(fib); i++)
-		writel(fib[i], rx->ni + 0x1b58 - 4 * i);
-	ret = rtl_qm_indirect(rx, 0x1b44, BIT(31) | BIT(30));
+		rtl_ni_write(rx->regs, RTL_NI_QM_FIB_WORDS - 4 * i, fib[i]);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_FIB_CMD, BIT(31) | BIT(30));
 	if (ret)
 		return ret;
 
-	writel(9, rx->ni + 0x1658);
-	ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | 16);
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_MAP_DATA, 9);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | 16);
 	if (ret)
 		return ret;
-	ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | 0x90);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | 0x90);
 	if (ret)
 		return ret;
-	ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | 0x50);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | 0x50);
 	if (ret)
 		return ret;
-	ret = rtl_qm_indirect(rx, 0x1654, BIT(31) | BIT(30) | 0xd0);
-	if (ret)
-		return ret;
-
-	writel(~(port << 6), rx->ni + 0x1e10);
-	writel(~0U, rx->ni + 0x1e0c);
-	writel(~0U, rx->ni + 0x1e08);
-	ret = rtl_qm_indirect(rx, 0x1e04, BIT(31) | BIT(30) | port);
-	if (ret)
-		return ret;
-	writel(~0xfc0U | (port << 6), rx->ni + 0x1e10);
-	writel(~0U, rx->ni + 0x1e0c);
-	writel(~0U, rx->ni + 0x1e08);
-	ret = rtl_qm_indirect(rx, 0x1e04, BIT(31) | BIT(30) | (512 + port));
-	if (ret)
-		return ret;
-	writel(0, rx->ni + 0x1e20);
-	writel((3 << 5) | (16 << 8), rx->ni + 0x1e1c);
-	writel(BIT(6), rx->ni + 0x1e18);
-	ret = rtl_qm_indirect(rx, 0x1e14, BIT(31) | BIT(30) | port);
-	if (ret)
-		return ret;
-	writel(BIT(1), rx->ni + 0x1428);
-	writel(0, rx->ni + 0x1424);
-	ret = rtl_qm_indirect(rx, 0x1420, BIT(31) | BIT(30) | 16);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_MAP_CMD, BIT(31) | BIT(30) | 0xd0);
 	if (ret)
 		return ret;
 
-	writel(readl(rx->ni + 0xa1dc) & ~0xffffU, rx->ni + 0xa1dc);
-	writel(readl(rx->ni + 0xa1ec) & ~0xffffU, rx->ni + 0xa1ec);
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA3, ~(port << 6));
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA2, ~0U);
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA, ~0U);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_ATTR_A_CMD, BIT(31) | BIT(30) | port);
+	if (ret)
+		return ret;
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA3, ~0xfc0U | (port << 6));
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA2, ~0U);
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_A_DATA, ~0U);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_ATTR_A_CMD, BIT(31) | BIT(30) | (512 + port));
+	if (ret)
+		return ret;
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_B_DATA3, 0);
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_B_DATA2, (3 << 5) | (16 << 8));
+	rtl_ni_write(rx->regs, RTL_NI_QM_PORT_ATTR_B_DATA, BIT(6));
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_PORT_ATTR_B_CMD, BIT(31) | BIT(30) | port);
+	if (ret)
+		return ret;
+	rtl_ni_write(rx->regs, RTL_NI_QM_CPU_PORT_EN, BIT(1));
+	rtl_ni_write(rx->regs, RTL_NI_QM_CPU_PORT_CFG, 0);
+	ret = rtl_qm_indirect(rx, RTL_NI_QM_CPU_PORT_CMD, BIT(31) | BIT(30) | 16);
+	if (ret)
+		return ret;
 
-	writel(readl(rx->ni + 0x1404) | BIT(0) | BIT(1), rx->ni + 0x1404);
+	rtl_ni_write(rx->regs, RTL_NI_NITX_THROTTLE, rtl_ni_read(rx->regs, RTL_NI_NITX_THROTTLE) & ~0xffffU);
+	rtl_ni_write(rx->regs, RTL_NI_NITX_THROTTLE_2, rtl_ni_read(rx->regs, RTL_NI_NITX_THROTTLE_2) & ~0xffffU);
+
+	rtl_ni_write(rx->regs, RTL_NI_QM_RX_ENABLE, rtl_ni_read(rx->regs, RTL_NI_QM_RX_ENABLE) | BIT(0) | BIT(1));
 	return 0;
 }
 
@@ -199,14 +190,14 @@ static unsigned int rtl_dq_read(void *context, unsigned int reg)
 {
 	struct rtl_qm_rx *rx = context;
 
-	return readl(rx->ni + reg);
+	return rtl_ni_read(rx->regs, reg);
 }
 
 static void rtl_dq_write(void *context, unsigned int reg, unsigned int value)
 {
 	struct rtl_qm_rx *rx = context;
 
-	writel(value, rx->ni + reg);
+	rtl_ni_write(rx->regs, reg, value);
 }
 
 static int rtl_dq_indirect(void *context, unsigned int reg, unsigned int value)
@@ -219,33 +210,33 @@ static void rtl_qm_axi_reorder(struct rtl_qm_rx *rx)
 	void __iomem *base = rx->axi_reorder;
 
 	writel(15, base);
-	writel(BIT(31) | 12, base + 4);
-	writel(BIT(28), base + 8);
-	writel(BIT(28), base + 12);
-	writel(BIT(31) | 13, base + 16);
-	writel(15, base + 0x400);
-	writel(BIT(31) | 12, base + 0x404);
-	writel(BIT(28), base + 0x408);
-	writel(BIT(28), base + 0x40c);
-	writel(BIT(31) | 13, base + 0x410);
-	writel(2, base + 0x480);
-	writel(BIT(31) | 8, base + 0x484);
-	writel(BIT(28), base + 0x488);
-	writel(BIT(28), base + 0x48c);
-	writel(BIT(31) | 9, base + 0x490);
+	writel(BIT(31) | 12, base + RTL_NI_QM_AXI_USER);
+	writel(BIT(28), base + RTL_NI_QM_AXI_ATTR);
+	writel(BIT(28), base + RTL_NI_QM_AXI_ATTR2);
+	writel(BIT(31) | 13, base + RTL_NI_QM_AXI_ID);
+	writel(15, base + RTL_NI_QM_AXI_CH1);
+	writel(BIT(31) | 12, base + RTL_NI_QM_AXI_CH1 + RTL_NI_QM_AXI_USER);
+	writel(BIT(28), base + RTL_NI_QM_AXI_CH1 + RTL_NI_QM_AXI_ATTR);
+	writel(BIT(28), base + RTL_NI_QM_AXI_CH1 + RTL_NI_QM_AXI_ATTR2);
+	writel(BIT(31) | 13, base + RTL_NI_QM_AXI_CH1 + RTL_NI_QM_AXI_ID);
+	writel(2, base + RTL_NI_QM_AXI_CH2);
+	writel(BIT(31) | 8, base + RTL_NI_QM_AXI_CH2 + RTL_NI_QM_AXI_USER);
+	writel(BIT(28), base + RTL_NI_QM_AXI_CH2 + RTL_NI_QM_AXI_ATTR);
+	writel(BIT(28), base + RTL_NI_QM_AXI_CH2 + RTL_NI_QM_AXI_ATTR2);
+	writel(BIT(31) | 9, base + RTL_NI_QM_AXI_CH2 + RTL_NI_QM_AXI_ID);
 }
 
 static int rtl_qm_cpu_credits(struct rtl_qm_rx *rx)
 {
 	unsigned int profile, cpu, voq;
-	u32 select = readl(rx->ni + 0x95a0);
+	u32 select = rtl_ni_read(rx->regs, RTL_NI_QM_CPU_SELECT);
 	int ret;
 
 	for (profile = 0; profile < 2; profile++) {
 		unsigned int count = profile ? RTL_QM_PE_BUFFERS - 4 : RTL_QM_BUFFERS_PER_EQ;
 
-		writel((count / 8) << 16 | (count / 64), rx->ni + 0x9580 + profile * 4);
-		writel(0x3fff3fff, rx->ni + 0x9590 + profile * 4);
+		rtl_ni_write(rx->regs, RTL_NI_QM_CPU_BUDGET(profile), (count / 8) << 16 | (count / 64));
+		rtl_ni_write(rx->regs, RTL_NI_QM_CPU_BURST(profile), 0x3fff3fff);
 	}
 	for (cpu = 0; cpu < 4; cpu++) {
 		unsigned int count0, count1, eq_profile;
@@ -260,22 +251,22 @@ static int rtl_qm_cpu_credits(struct rtl_qm_rx *rx)
 		if (cpu) {
 			unsigned int eq = RTL_QM_PE_EQ + (3 - cpu);
 
-			writel(eq | (15 << 4), rx->ni + 0x6128 + eq_profile * 4);
-			writel(eq_profile, rx->ni + 0x6148 + cpu * 4);
+			rtl_ni_write(rx->regs, RTL_NI_QM_EQ_PROFILE(eq_profile), eq | (15 << 4));
+			rtl_ni_write(rx->regs, RTL_NI_QM_CPU_EQ(cpu), eq_profile);
 		}
-		writel(count0 | BIT(14) | (count1 << 16) | BIT(30), rx->ni + 0x95ac);
-		ret = rtl_qm_indirect(rx, 0x95a8, BIT(31) | BIT(30) | cpu);
+		rtl_ni_write(rx->regs, RTL_NI_QM_CPU_CFG, count0 | BIT(14) | (count1 << 16) | BIT(30));
+		ret = rtl_qm_indirect(rx, RTL_NI_QM_CPU_CFG_CMD, BIT(31) | BIT(30) | cpu);
 		if (ret)
 			return ret;
 		select = (select & ~(3U << (cpu * 2))) | (profile << (cpu * 2));
 
-		writel(12 | (12 << 16), rx->ni + 0x9560 + eq_profile * 4);
+		rtl_ni_write(rx->regs, RTL_NI_QM_EQ_WEIGHT(eq_profile), 12 | (12 << 16));
 		for (voq = cpu * 8; voq < cpu * 8 + 8; voq++) {
 			if (cpu)
-				writel(eq_profile, rx->ni + 0x65a4 + voq * 4);
+				rtl_ni_write(rx->regs, RTL_NI_QM_VOQ_EQ(voq), eq_profile);
 
-			writel(cpu == 3 ? 4 : profile, rx->ni + 0x95c4);
-			ret = rtl_qm_indirect(rx, 0x95c0, BIT(31) | BIT(30) | voq);
+			rtl_ni_write(rx->regs, RTL_NI_QM_VOQ_PROFILE, cpu == 3 ? 4 : profile);
+			ret = rtl_qm_indirect(rx, RTL_NI_QM_VOQ_PROFILE_CMD, BIT(31) | BIT(30) | voq);
 			if (ret)
 				return ret;
 		}
@@ -283,76 +274,76 @@ static int rtl_qm_cpu_credits(struct rtl_qm_rx *rx)
 	for (profile = 0; profile < 3; profile++) {
 		unsigned int count = profile ? RTL_QM_PE_BUFFERS - 4 : RTL_QM_BUFFERS_PER_EQ;
 
-		writel(0, rx->ni + 0x95b4);
-		writel((profile == 1 ? 12 : 3) << 24, rx->ni + 0x95b8);
-		writel(((count * 7 / 8) << 14) | (count * 6 / 8), rx->ni + 0x95bc);
-		ret = rtl_qm_indirect(rx, 0x95b0, BIT(31) | BIT(30) | (profile == 2 ? 4 : profile));
+		rtl_ni_write(rx->regs, RTL_NI_QM_VOQ_CFG, 0);
+		rtl_ni_write(rx->regs, RTL_NI_QM_VOQ_WEIGHT, (profile == 1 ? 12 : 3) << 24);
+		rtl_ni_write(rx->regs, RTL_NI_QM_VOQ_THRESHOLD, ((count * 7 / 8) << 14) | (count * 6 / 8));
+		ret = rtl_qm_indirect(rx, RTL_NI_QM_VOQ_CMD, BIT(31) | BIT(30) | (profile == 2 ? 4 : profile));
 		if (ret)
 			return ret;
 	}
-	writel(select, rx->ni + 0x95a0);
+	rtl_ni_write(rx->regs, RTL_NI_QM_CPU_SELECT, select);
 	return 0;
 }
 
 int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port)
 {
-	void __iomem *ni = rx->ni;
+	struct regmap *ni = rx->regs;
 	unsigned int i;
 	u32 value;
 	int ret;
 	const struct rtl_dq_io dq = {rx, rtl_dq_read, rtl_dq_write, rtl_dq_indirect};
 
 	rx->deepq_configured = false;
-	writel(readl(ni + CB_CTRL) & ~BIT(31), ni + CB_CTRL);
-	writel(readl(ni + RMU_CTRL) & ~BIT(31), ni + RMU_CTRL);
-	writel(readl(ni + ES_CTRL) & ~BIT(31), ni + ES_CTRL);
+	rtl_ni_write(ni, RTL_NI_QM_CB_CTRL, rtl_ni_read(ni, RTL_NI_QM_CB_CTRL) & ~BIT(31));
+	rtl_ni_write(ni, RTL_NI_QM_RMU_CTRL, rtl_ni_read(ni, RTL_NI_QM_RMU_CTRL) & ~BIT(31));
+	rtl_ni_write(ni, RTL_NI_QM_ES_CTRL, rtl_ni_read(ni, RTL_NI_QM_ES_CTRL) & ~BIT(31));
 
 	writel(readl(rx->block_reset) | BIT(5), rx->block_reset);
 	udelay(1000);
 	writel(readl(rx->block_reset) & ~BIT(5), rx->block_reset);
-	ret = readl_poll_timeout(ni + 0x6850, value, value & BIT(30), 1, 100000);
+	ret = regmap_read_poll_timeout(ni, RTL_NI_QM_RESET_STATUS, value, value & BIT(30), 1, 100000);
 	if (ret)
 		return ret;
 
 	memset(&rx->refill, 0, sizeof(rx->refill));
-	writel(readl(ni + RMU_CTRL) & ~BIT(31), ni + RMU_CTRL);
-	writel(readl(ni + ES_CTRL) & ~BIT(31), ni + ES_CTRL);
-	writel(0, ni + 0x6110);
-	writel(0, ni + 0x6114);
+	rtl_ni_write(ni, RTL_NI_QM_RMU_CTRL, rtl_ni_read(ni, RTL_NI_QM_RMU_CTRL) & ~BIT(31));
+	rtl_ni_write(ni, RTL_NI_QM_ES_CTRL, rtl_ni_read(ni, RTL_NI_QM_ES_CTRL) & ~BIT(31));
+	rtl_ni_write(ni, RTL_NI_QM_EQ_IRQ_ENABLE_LO, 0);
+	rtl_ni_write(ni, RTL_NI_QM_EQ_IRQ_ENABLE_HI, 0);
 
 	for (i = 0; i < RTL_QM_VOQS; i++) {
-		rx->read[i] = readl(ni + EPP_WRITE + i * 4) & (RTL_QM_RING_BYTES - 1);
-		writel(rx->read[i], ni + EPP_READ + i * 4);
+		rx->read[i] = rtl_ni_read(ni, RTL_NI_QM_EPP_WRITE + i * 4) & (RTL_QM_RING_BYTES - 1);
+		rtl_ni_write(ni, RTL_NI_QM_EPP_READ + i * 4, rx->read[i]);
 	}
-	readl(ni + EPP_READ);
+	rtl_ni_read(ni, RTL_NI_QM_EPP_READ);
 	rtl_qm_axi_reorder(rx);
 	memset(rx->ring_memory, 0, RTL_QM_RING_BYTES * RTL_QM_VOQS);
 	dma_sync_single_for_device(rx->device, rx->memory_dma, RTL_QM_MEMORY_BYTES, DMA_FROM_DEVICE);
 
 	for (i = 0; i < 16; i++) {
-		writel(0, ni + 0x61e8 + i * 20);
-		writel(0, ni + 0x61ec + i * 20);
+		rtl_ni_write(ni, RTL_NI_QM_EQ_CFG(i), 0);
+		rtl_ni_write(ni, RTL_NI_QM_EQ_CFG(i) + 4, 0);
 	}
 
 	for (i = 0; i < 2; i++) {
 		unsigned int cfg = EQ_CFG + i * 20;
 
-		writel(1, ni + cfg);
-		writel((RTL_QM_BUFFERS_PER_EQ << 16) | (i * RTL_QM_BUFFERS_PER_EQ), ni + cfg + 4);
-		writel(5 | BIT(3) | (24 << 8), ni + cfg + 8);
-		writel(0x61008060, ni + cfg + 12);
-		writel(2, ni + cfg + 16);
+		rtl_ni_write(ni, cfg, 1);
+		rtl_ni_write(ni, cfg + 4, (RTL_QM_BUFFERS_PER_EQ << 16) | (i * RTL_QM_BUFFERS_PER_EQ));
+		rtl_ni_write(ni, cfg + 8, 5 | BIT(3) | (24 << 8));
+		rtl_ni_write(ni, cfg + 12, 0x61008060);
+		rtl_ni_write(ni, cfg + 16, 2);
 	}
 	ret = rtl_qm_deepq_prepare(&dq, lower_32_bits(rx->deepq_dma));
 	if (ret)
 		return ret;
-	writel(EQ_ID | ((EQ_ID + 1) << 4), ni + EQ_PROFILE);
-	writel(EQ_ID, ni + 0x6148);
-	writel(RTL_QM_PACKET_LAYOUT, ni + 0x61c8);
-	writel(0x05102013, ni + 0x66d4);
-	writel(0xffff, ni + 0x63a8);
-	writel(0, ni + 0x63a8);
-	writel(0, ni + 0x66d4);
+	rtl_ni_write(ni, EQ_PROFILE, EQ_ID | ((EQ_ID + 1) << 4));
+	rtl_ni_write(ni, RTL_NI_QM_CPU_EQ(0), EQ_ID);
+	rtl_ni_write(ni, RTL_NI_QM_PACKET_LAYOUT, RTL_QM_PACKET_LAYOUT);
+	rtl_ni_write(ni, RTL_NI_QM_INGRESS_CFG, 0x05102013);
+	rtl_ni_write(ni, RTL_NI_QM_FLUSH, 0xffff);
+	rtl_ni_write(ni, RTL_NI_QM_FLUSH, 0);
+	rtl_ni_write(ni, RTL_NI_QM_INGRESS_CFG, 0);
 
 	for (i = 0; i < 16; i++) {
 		ret = rtl_qm_attribute(rx, i, 0);
@@ -362,17 +353,17 @@ int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port)
 	ret = rtl_qm_attribute(rx, 48, 0x0a008060);
 	if (ret)
 		return ret;
-	value = readl(ni + 0x6000);
-	writel((value & ~(BIT(11) | BIT(13))) | 0xff, ni + 0x6000);
-	writel(readl(ni + 0x68f4) | BIT(2), ni + 0x68f4);
-	writel(0, ni + 0x6558);
+	value = rtl_ni_read(ni, RTL_NI_QM_CONTROL);
+	rtl_ni_write(ni, RTL_NI_QM_CONTROL, (value & ~(BIT(11) | BIT(13))) | 0xff);
+	rtl_ni_write(ni, RTL_NI_QM_STATUS, rtl_ni_read(ni, RTL_NI_QM_STATUS) | BIT(2));
+	rtl_ni_write(ni, RTL_NI_QM_DROP_CFG, 0);
 
-	writel((readl(ni + 0x657c + EQ_ID * 4) & GENMASK(31, 29)) |
-	       ((RTL_QM_RING_BYTES / 16) << 8) | 0xf2,
-	       ni + 0x657c + EQ_ID * 4);
+	rtl_ni_write(ni, RTL_NI_QM_EQ_QUEUE(EQ_ID),
+		     (rtl_ni_read(ni, RTL_NI_QM_EQ_QUEUE(EQ_ID)) & GENMASK(31, 29)) |
+		     ((RTL_QM_RING_BYTES / 16) << 8) | 0xf2);
 	for (i = 0; i < RTL_QM_VOQS; i++) {
-		writel(EQ_ID, ni + 0x65a4 + i * 4);
-		writel(rx->ring_dma + i * RTL_QM_RING_BYTES, ni + EPP_BASE + i * 4);
+		rtl_ni_write(ni, RTL_NI_QM_VOQ_EQ(i), EQ_ID);
+		rtl_ni_write(ni, RTL_NI_QM_EPP_BASE + i * 4, rx->ring_dma + i * RTL_QM_RING_BYTES);
 	}
 	for (i = 0; i < RTL_QM_BUFFERS; i++) {
 		ret = rtl_qm_push(rx, rx->memory_dma + RTL_QM_RING_BYTES * RTL_QM_VOQS +
@@ -383,8 +374,8 @@ int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port)
 	ret = rtl_qm_cpu_credits(rx);
 	if (ret)
 		return ret;
-	writel(0xff, ni + 0x63c4);
-	writel(readl(ni + 0xa1bc) & ~0xffU, ni + 0xa1bc);
+	rtl_ni_write(ni, RTL_NI_QM_QUEUE_ENABLE, 0xff);
+	rtl_ni_write(ni, RTL_NI_NITX_BACKPRESSURE, rtl_ni_read(ni, RTL_NI_NITX_BACKPRESSURE) & ~0xffU);
 
 	for (i = 0; i < ARRAY_SIZE(rx->lan); i++)
 		if (rcu_access_pointer(rx->lan[i])) {
@@ -397,23 +388,23 @@ int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port)
 		return ret;
 
 	for (i = 0; i < 16; i++) {
-		writel(0x8e308000, ni + 0x2db8);
-		ret = rtl_qm_indirect(rx, 0x2db4, BIT(31) | BIT(30) | i);
+		rtl_ni_write(ni, RTL_NI_QM_TCAM_DATA, 0x8e308000);
+		ret = rtl_qm_indirect(rx, RTL_NI_QM_TCAM_CMD, BIT(31) | BIT(30) | i);
 		if (ret)
 			return ret;
 	}
 
-	writel(readl(ni + 0x2300) | BIT(8) | BIT(9), ni + 0x2300);
-	writel(0xff | (6 << 16), ni + 0x2304 + 12 * 8);
-	writel(0xff | (6 << 16), ni + 0x2304 + 12 * 9);
+	rtl_ni_write(ni, RTL_NI_L2TM_ES_CTRL, rtl_ni_read(ni, RTL_NI_L2TM_ES_CTRL) | BIT(8) | BIT(9));
+	rtl_ni_write(ni, RTL_NI_PORT_TABLE_ENTRY(8), 0xff | (6 << 16));
+	rtl_ni_write(ni, RTL_NI_PORT_TABLE_ENTRY(9), 0xff | (6 << 16));
 
-	writel(readl(ni + CB_CTRL) | BIT(31), ni + CB_CTRL);
+	rtl_ni_write(ni, RTL_NI_QM_CB_CTRL, rtl_ni_read(ni, RTL_NI_QM_CB_CTRL) | BIT(31));
 
-	writel(readl(ni + 0x9004) | BIT(2), ni + 0x9004);
+	rtl_ni_write(ni, RTL_NI_QM_CLOCK_CTRL, rtl_ni_read(ni, RTL_NI_QM_CLOCK_CTRL) | BIT(2));
 
-	writel(0x8462ff01, ni + ES_CTRL);
-	writel(readl(ni + 0x610c) | 0xffffU, ni + 0x610c);
-	writel(readl(ni + RMU_CTRL) | BIT(31), ni + RMU_CTRL);
+	rtl_ni_write(ni, RTL_NI_QM_ES_CTRL, 0x8462ff01);
+	rtl_ni_write(ni, 0x610c, rtl_ni_read(ni, 0x610c) | 0xffffU);
+	rtl_ni_write(ni, RTL_NI_QM_RMU_CTRL, rtl_ni_read(ni, RTL_NI_QM_RMU_CTRL) | BIT(31));
 	rx->deepq_configured = true;
 	return 0;
 }
@@ -421,10 +412,10 @@ int rtl_qm_rx_start(struct rtl_qm_rx *rx, unsigned int port)
 void rtl_qm_rx_stop(struct rtl_qm_rx *rx)
 {
 	rx->deepq_configured = false;
-	writel(readl(rx->ni + CB_CTRL) & ~BIT(31), rx->ni + CB_CTRL);
-	writel(readl(rx->ni + 0x610c) & ~0xffffU, rx->ni + 0x610c);
-	writel(readl(rx->ni + RMU_CTRL) & ~BIT(31), rx->ni + RMU_CTRL);
-	writel(readl(rx->ni + ES_CTRL) & ~BIT(31), rx->ni + ES_CTRL);
+	rtl_ni_write(rx->regs, RTL_NI_QM_CB_CTRL, rtl_ni_read(rx->regs, RTL_NI_QM_CB_CTRL) & ~BIT(31));
+	rtl_ni_write(rx->regs, 0x610c, rtl_ni_read(rx->regs, 0x610c) & ~0xffffU);
+	rtl_ni_write(rx->regs, RTL_NI_QM_RMU_CTRL, rtl_ni_read(rx->regs, RTL_NI_QM_RMU_CTRL) & ~BIT(31));
+	rtl_ni_write(rx->regs, RTL_NI_QM_ES_CTRL, rtl_ni_read(rx->regs, RTL_NI_QM_ES_CTRL) & ~BIT(31));
 }
 
 void rtl_qm_rx_free(struct device *dev, struct rtl_qm_rx *rx)
@@ -439,7 +430,7 @@ static void rtl_qm_rx_retire(struct rtl_qm_rx *rx, unsigned int cos,
 {
 	rx->read[cos] = (rx->read[cos] + RTL_QM_COMMAND_BYTES) & (RTL_QM_RING_BYTES - 1);
 	mb();
-	writel(rx->read[cos], rx->ni + EPP_READ + cos * 4);
+	rtl_ni_write(rx->regs, RTL_NI_QM_EPP_READ + cos * 4, rx->read[cos]);
 	if (refill) {
 		u32 offset = (command & 0xffffff80) - lower_32_bits(rx->memory_dma);
 		dma_sync_single_for_device(rx->device, rx->memory_dma + offset,
@@ -453,14 +444,14 @@ int rtl_qm_rx_poll(struct rtl_qm_rx *rx, struct napi_struct *napi, int budget)
 	struct net_device *dev = napi->dev;
 	int cos;
 	int count = 0;
-	bool checksum_enabled = readl(rx->ni + 0x3218) & BIT(16);
+	bool checksum_enabled = rtl_ni_read(rx->regs, RTL_FE_CAM_DATA_AUX) & BIT(16);
 
 	rtl_qm_refill_drain(&rx->refill, rx, rtl_qm_try_push, NAPI_POLL_WEIGHT);
 
 	for (cos = RTL_QM_VOQS - 1; cos >= 0 && count < budget; cos--) {
 
-		bool nonempty = readl(rx->ni + 0x659c) & BIT(cos);
-		unsigned int wr = readl(rx->ni + EPP_WRITE + cos * 4) & 0xffffff;
+		bool nonempty = rtl_ni_read(rx->regs, RTL_NI_QM_VOQ_STATUS) & BIT(cos);
+		unsigned int wr = rtl_ni_read(rx->regs, RTL_NI_QM_EPP_WRITE + cos * 4) & 0xffffff;
 		bool full = rx->read[cos] == wr && nonempty;
 
 		while ((rx->read[cos] != wr || full) && count < budget) {
