@@ -4,7 +4,7 @@ LUCI_TITLE:=RTL9617C PON configuration and live status
 LUCI_DEPENDS:=+luci-base +luci-theme-argon +luci-i18n-argon-config-zh-cn +luci-mod-network +luci-mod-status +luci-proto-ppp +luci-proto-ipv6 +luci-i18n-base-zh-cn +rpcd-mod-ucode +ucode-mod-fs +rtl9617c-pon-control
 LUCI_PKGARCH:=all
 PKG_VERSION:=0.11.0
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 PKG_LICENSE:=GPL-2.0-or-later
 # CSSTidy 1.3 predates CSS variables and responsive grid expressions.
 CONFIG_LUCI_CSSTIDY:=
