@@ -25,7 +25,7 @@ define Device/youhua_pt1500_h10_2p5g
   DEVICE_VARIANT := 2.5G
   SUPPORTED_DEVICES += youhua,pt1500-h10-2p5g
   DEVICE_DTS := rtl9617c-pt1500-h10-2p5g
-  DEVICE_PACKAGES := fitblk rtl9617c-pon-control luci-app-rtl9617c-pon luci-app-rtl9617c-qos luci-theme-argon \
+  DEVICE_PACKAGES := fitblk rtl9617c-pon-control luci-app-rtl9617c-pon luci-app-rtl9617c-qos-v2 luci-theme-argon \
 	kmod-gpio-button-hotplug luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-mod-system \
 	uhttpd uhttpd-mod-ubus iperf3 ethtool ip-full tc curl htop openssl-util mtr socat \
 	conntrack-tools
@@ -38,7 +38,7 @@ define Device/tianyi_tyfza1_2p5g
   DEVICE_VARIANT := 2.5G
   SUPPORTED_DEVICES += tianyi,tyfza1-2p5g
   DEVICE_DTS := rtl9617c-tianyi-tyfza1-2p5g
-  DEVICE_PACKAGES := fitblk rtl9617c-pon-control luci-app-rtl9617c-pon luci-app-rtl9617c-qos luci-theme-argon \
+  DEVICE_PACKAGES := fitblk rtl9617c-pon-control luci-app-rtl9617c-pon luci-app-rtl9617c-qos-v2 luci-theme-argon \
 	kmod-gpio-button-hotplug luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-mod-system \
 	uhttpd uhttpd-mod-ubus iperf3 ethtool ip-full tc curl htop openssl-util mtr socat \
 	conntrack-tools wpad-basic-mbedtls kmod-rtw89-8852ce rtl8852ce-ap-firmware \
