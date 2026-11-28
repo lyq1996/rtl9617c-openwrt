@@ -590,10 +590,11 @@ int rtl_te_hostpol_add_vmeter(struct rtl_te_flow *te,
 int rtl_te_hostpol_del(struct rtl_te_flow *te, const u8 mac[RTL_TE_HOSTPOL_ALEN]);
 
 /*
- * dir: RTL_TE_HOSTPOL_DIR_INGRESS resolves the G3 flow decision for this
- * MAC as the SMAC host (ingress rate limit > egress rate limit > egress MIB
- * slot, phase2-re10 section 4.10); _EGRESS returns the DA side slot.
- * Returns -ENOENT for an unknown MAC.
+ * dir: RTL_TE_HOSTPOL_DIR_INGRESS resolves the SA-side POL1 slot (0xA0 +
+ * vmeter when rate limited, or the ingress MIB slot 0xC0 + entry when counting
+ * only); RTL_TE_HOSTPOL_DIR_EGRESS resolves the DA-side POL1 slot (0xA0 +
+ * vmeter when rate limited, or the egress MIB slot 0xE0 + entry when counting
+ * only).  Returns -ENOENT for an unknown MAC.
  */
 int rtl_te_hostpol_lookup(struct rtl_te_flow *te, const u8 mac[RTL_TE_HOSTPOL_ALEN],
 			  u8 dir, u8 *slot);

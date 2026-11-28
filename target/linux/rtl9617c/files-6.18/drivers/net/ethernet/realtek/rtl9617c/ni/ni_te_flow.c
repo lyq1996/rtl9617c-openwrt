@@ -1367,11 +1367,15 @@ static int te_hostpol_del_locked(struct rtl_te_flow *te,
 }
 
 /*
- * Resolve the POL1 slot a flow for this MAC must point at.
+ * Resolve the POL1 slot for one direction of a MAC entry.
  *
- * INGRESS is the G3 flow decision for the entry as the SMAC host: an ingress
- * rate limit wins over an egress rate limit, and a counting-only entry binds
- * the egress MIB slot (phase2-re10 section 4.10).  EGRESS is the DA side.
+ * INGRESS (SA host) resolves to h->pol1[INGRESS]: 0xA0 + vmeter when rate
+ * limited, or the dedicated ingress MIB slot 0xC0 + entry when counting only.
+ * EGRESS (DA host) resolves to h->pol1[EGRESS]: 0xA0 + vmeter when rate
+ * limited, or the dedicated egress MIB slot 0xE0 + entry when counting only.
+ * Cross-direction priority when both SA and DA match host entries on the same
+ * flow (SA ingress rate limit > DA egress rate limit > SA ingress MIB > DA
+ * egress MIB) is decided by the flow binder.
  */
 static int te_hostpol_lookup_locked(struct rtl_te_flow *te,
 				    const u8 mac[RTL_TE_HOSTPOL_ALEN],
@@ -1388,24 +1392,8 @@ static int te_hostpol_lookup_locked(struct rtl_te_flow *te,
 		return -ENOENT;
 	h = &te->hostpol[entry];
 
-	if (dir == RTL_TE_HOSTPOL_DIR_INGRESS) {
-		if (h->kbps[RTL_TE_HOSTPOL_DIR_INGRESS]) {
-			*slot = h->pol1[RTL_TE_HOSTPOL_DIR_INGRESS];
-			*rate_limited = true;
-			return 0;
-		}
-		if (h->kbps[RTL_TE_HOSTPOL_DIR_EGRESS]) {
-			*slot = h->pol1[RTL_TE_HOSTPOL_DIR_EGRESS];
-			*rate_limited = true;
-			return 0;
-		}
-		*slot = (u16)(RTL_TE_HOSTPOL_MIB_EG_BASE + entry);
-		*rate_limited = false;
-		return 0;
-	}
-
-	*slot = h->pol1[RTL_TE_HOSTPOL_DIR_EGRESS];
-	*rate_limited = h->kbps[RTL_TE_HOSTPOL_DIR_EGRESS] != 0;
+	*slot = h->pol1[dir];
+	*rate_limited = h->kbps[dir] != 0;
 	return 0;
 }
 

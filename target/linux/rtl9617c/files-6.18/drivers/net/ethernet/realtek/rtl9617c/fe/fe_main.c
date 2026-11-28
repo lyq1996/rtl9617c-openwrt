@@ -1844,9 +1844,10 @@ static int rtl_fe_flow_pol_id(const struct rtl_fe_flow *flow)
 }
 
 static int rtl_fe_hostpol_lookup(struct rtl_fe *fe, const u8 mac[ETH_ALEN],
-				 u8 dir, u8 *slot)
+				 u8 dir, u8 *slot, bool *rate_limited)
 {
-	int ret = rtl_te_hostpol_lookup(fe->te, mac, dir, slot);
+	int ret = rtl_te_hostpol_lookup_ex(fe->te, mac, dir, slot,
+					   rate_limited);
 
 	/* "no such MAC entry" and "entry has no slot in this direction" are both
 	 * plain misses for a flow binding.
@@ -1855,8 +1856,54 @@ static int rtl_fe_hostpol_lookup(struct rtl_fe *fe, const u8 mac[ETH_ALEN],
 }
 
 /*
+ * Decide the single Host Policing POL1 slot for an L3 flow from its source
+ * (SA / ingress) and destination (DA / egress) MACs.
+ *
+ * Priority follows fc_8277c _rtk_fc_g3FlowIdDecision:
+ *   1. SA ingress rate limit (0xA0 + vm)
+ *   2. DA egress rate limit  (0xA0 + vm)
+ *   3. SA ingress MIB slot   (0xC0 + idx, counting only)
+ *   4. DA egress MIB slot    (0xE0 + idx, counting only)
+ */
+static int rtl_fe_hostpol_decide(struct rtl_fe *fe, const u8 src[ETH_ALEN],
+				 const u8 dst[ETH_ALEN], u8 *slot)
+{
+	bool in_limited = false, eg_limited = false;
+	u8 in_slot = 0, eg_slot = 0;
+	int in_ret, eg_ret;
+
+	in_ret = rtl_fe_hostpol_lookup(fe, src, RTL_TE_HOSTPOL_DIR_INGRESS,
+				       &in_slot, &in_limited);
+	if (in_ret && in_ret != -ENOENT)
+		return in_ret;
+	if (!in_ret && in_limited) {
+		*slot = in_slot;
+		return 0;
+	}
+
+	eg_ret = rtl_fe_hostpol_lookup(fe, dst, RTL_TE_HOSTPOL_DIR_EGRESS,
+				       &eg_slot, &eg_limited);
+	if (eg_ret && eg_ret != -ENOENT)
+		return eg_ret;
+	if (!eg_ret && eg_limited) {
+		*slot = eg_slot;
+		return 0;
+	}
+
+	if (!in_ret) {
+		*slot = in_slot;
+		return 0;
+	}
+	if (!eg_ret) {
+		*slot = eg_slot;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+/*
  * Bind an L3 flow to a Host Policing entry.  The source MAC is the ingress
- * (SA) key and the destination MAC the egress (DA) key, tried in that order
+ * (SA) key and the destination MAC the egress (DA) key
  * (phase2-re4-hostpolicing.md section 5.5: one MAC entry serves both
  * directions).  A hit does not take ownership of the POL1 slot: the slot
  * belongs to the MAC table entry and outlives every flow bound to it.
@@ -1867,11 +1914,7 @@ static int rtl_fe_hostpol_bind(struct rtl_fe *fe, struct rtl_fe_rule *data,
 	u8 slot;
 	int ret;
 
-	ret = rtl_fe_hostpol_lookup(fe, data->source,
-				    RTL_TE_HOSTPOL_DIR_INGRESS, &slot);
-	if (ret == -ENOENT)
-		ret = rtl_fe_hostpol_lookup(fe, data->destination,
-					    RTL_TE_HOSTPOL_DIR_EGRESS, &slot);
+	ret = rtl_fe_hostpol_decide(fe, data->source, data->destination, &slot);
 	if (ret == -ENOENT)
 		return 0;
 	if (ret)
@@ -2730,12 +2773,8 @@ static int rtl_fe_hostpol_rebind_flow(struct rtl_fe *fe,
 	    flow->kind == RTL_FE_RULE_BRIDGE || flow->pol_owned || !fe->te)
 		return 0;
 
-	ret = rtl_fe_hostpol_lookup(fe, flow->hostpol_source,
-				    RTL_TE_HOSTPOL_DIR_INGRESS, &want_slot);
-	if (ret == -ENOENT)
-		ret = rtl_fe_hostpol_lookup(fe, flow->destination,
-					    RTL_TE_HOSTPOL_DIR_EGRESS,
-					    &want_slot);
+	ret = rtl_fe_hostpol_decide(fe, flow->hostpol_source,
+				    flow->destination, &want_slot);
 	if (ret && ret != -ENOENT)
 		return ret;
 	if (!ret) {
