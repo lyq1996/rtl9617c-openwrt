@@ -191,7 +191,7 @@ static int taurus_uart_startup(struct uart_port *port)
 				taurus_uart_irq_cpu);
 	}
 
-	spin_lock_irqsave(&port->lock, flags);
+	uart_port_lock_irqsave(port, &flags);
 
 	temp = readl(port->membase + TAURUS_UCFG);
 	temp |= (TAURUS_CFG_UART_EN | TAURUS_CFG_TX_EN | TAURUS_CFG_RX_EN | 0x3);
@@ -200,14 +200,19 @@ static int taurus_uart_startup(struct uart_port *port)
 	writel(temp | TAURUS_CFG_TX_EN | TAURUS_CFG_RX_EN,
 	       port->membase + TAURUS_UINT_EN);
 
-	spin_unlock_irqrestore(&port->lock, flags);
+	uart_port_unlock_irqrestore(port, flags);
 	return 0;
 }
 
 static void taurus_uart_shutdown(struct uart_port *port)
 {
+	unsigned long flags;
+
+	uart_port_lock_irqsave(port, &flags);
 	taurus_uart_stop_tx(port);
 	taurus_uart_stop_rx(port);
+	uart_port_unlock_irqrestore(port, flags);
+
 	free_irq(port->irq, port);
 }
 
@@ -222,6 +227,8 @@ static void taurus_uart_set_termios(struct uart_port *port,
 						   uart);
 
 	baud = uart_get_baud_rate(port, termios, old, 0, 115200);
+	if (!baud)
+		baud = 9600;
 	temp = readl(port->membase + TAURUS_UCFG);
 	temp &= 0xff;
 	switch (baud) {
@@ -276,10 +283,10 @@ static void taurus_uart_set_termios(struct uart_port *port,
 			temp &= ~TAURUS_CFG_PARITY_EVEN;
 	}
 
-	spin_lock_irqsave(&port->lock, flags);
+	uart_port_lock_irqsave(port, &flags);
 	writel(temp, port->membase + TAURUS_UCFG);
 	writel(sample_fre, port->membase + TAURUS_URX_SAMPLE);
-	spin_unlock_irqrestore(&port->lock, flags);
+	uart_port_unlock_irqrestore(port, flags);
 }
 
 static const char *taurus_uart_type(struct uart_port *port)
@@ -369,6 +376,8 @@ static const struct uart_ops taurus_uart_ops = {
 static void taurus_uart_interrupt_rx_chars(struct uart_port *port,
 					   unsigned long status)
 {
+	struct taurus_uart_port *cp = container_of(port, struct taurus_uart_port,
+						   uart);
 	struct tty_port *ttyport = &port->state->port;
 	unsigned int ch;
 	unsigned int rx, flg;
@@ -382,7 +391,7 @@ static void taurus_uart_interrupt_rx_chars(struct uart_port *port,
 		port->icount.rx++;
 		ch = readl(port->membase + TAURUS_URX_DATA);
 
-		if (taurus_uart_ports[port->line]->break_indicator) {
+		if (cp->break_indicator) {
 			if (sysrq && (status & TAURUS_INT_RX_BREAK)) {
 				if (uart_handle_break(port))
 					goto ignore;
@@ -395,16 +404,16 @@ static void taurus_uart_interrupt_rx_chars(struct uart_port *port,
 		}
 		if (!(ch & 0x100))
 			goto ignore;
-		if (uart_handle_sysrq_char(port, (unsigned char)ch))
+		if (uart_prepare_sysrq_char(port, (unsigned char)ch))
 			goto ignore;
 		tty_insert_flip_char(ttyport, ch, flg);
 ignore:
 		rx = readl(port->membase + TAURUS_UINFO);
 	} while (!(TAURUS_INFO_RX_EMPTY & rx));
 
-	spin_unlock(&port->lock);
+	uart_port_unlock(port);
 	tty_flip_buffer_push(ttyport);
-	spin_lock(&port->lock);
+	uart_port_lock(port);
 }
 
 static void taurus_uart_interrupt_tx_chars(struct uart_port *port)
@@ -436,8 +445,7 @@ static irqreturn_t taurus_uart_interrupt(int irq, void *dev_id)
 	struct uart_port *port = (struct uart_port *)dev_id;
 	unsigned long temp;
 
-
-	spin_lock(&port->lock);
+	uart_port_lock(port);
 
 	temp = readl(port->membase + TAURUS_UINT_CLR);
 	writel(temp, port->membase + TAURUS_UINT_CLR);
@@ -445,7 +453,7 @@ static irqreturn_t taurus_uart_interrupt(int irq, void *dev_id)
 	taurus_uart_interrupt_rx_chars(port, temp);
 	taurus_uart_interrupt_tx_chars(port);
 
-	spin_unlock(&port->lock);
+	uart_unlock_and_check_sysrq(port);
 
 	return IRQ_HANDLED;
 }
@@ -462,12 +470,10 @@ static void taurus_console_write(struct console *co, const char *s,
 	int locked;
 
 	local_irq_save(flags);
-	if (port->sysrq) {
-		locked = 0;
-	} else if (oops_in_progress) {
-		locked = spin_trylock(&port->lock);
+	if (oops_in_progress) {
+		locked = uart_port_trylock(port);
 	} else {
-		spin_lock(&port->lock);
+		uart_port_lock(port);
 		locked = 1;
 	}
 
@@ -490,7 +496,7 @@ static void taurus_console_write(struct console *co, const char *s,
 	writel(previous, port->membase + TAURUS_UINT_EN);
 
 	if (locked)
-		spin_unlock(&port->lock);
+		uart_port_unlock(port);
 	local_irq_restore(flags);
 }
 
@@ -607,11 +613,10 @@ static int taurus_uart_probe(struct platform_device *pdev)
 	port->uart.has_sysrq = IS_ENABLED(CONFIG_SERIAL_REALTEK_TAURUS_CONSOLE);
 
 	if (of_property_read_u32(np, "clock-frequency", &of_clock_frequency)) {
-		pclk_info = clk_get(&pdev->dev, NULL);
+		pclk_info = devm_clk_get_enabled(&pdev->dev, NULL);
 		if (IS_ERR(pclk_info))
 			return PTR_ERR(pclk_info);
 
-		clk_prepare_enable(pclk_info);
 		of_clock_frequency = clk_get_rate(pclk_info);
 	}
 	port->uart.uartclk = of_clock_frequency;
@@ -623,6 +628,8 @@ static int taurus_uart_probe(struct platform_device *pdev)
 
 	port->en_gpio = devm_gpiod_get_optional(&pdev->dev, "en-io",
 						GPIOD_OUT_LOW);
+	if (IS_ERR(port->en_gpio))
+		return PTR_ERR(port->en_gpio);
 	if (of_property_read_u32(np, "en-tx-delay", &port->en_txdelay))
 		port->en_txdelay = 0;
 	if (port->en_gpio)
@@ -636,8 +643,10 @@ static int taurus_uart_probe(struct platform_device *pdev)
 		device_init_wakeup(&pdev->dev, true);
 
 	ret = uart_add_one_port(&taurus_uart_driver, &port->uart);
-	if (ret)
+	if (ret) {
+		taurus_uart_ports[port->uart.line] = NULL;
 		return ret;
+	}
 
 	platform_set_drvdata(pdev, port);
 
@@ -649,8 +658,8 @@ static void taurus_uart_remove(struct platform_device *pdev)
 	struct taurus_uart_port *port = platform_get_drvdata(pdev);
 
 	if (port) {
-		taurus_uart_ports[port->uart.line] = NULL;
 		uart_remove_one_port(&taurus_uart_driver, &port->uart);
+		taurus_uart_ports[port->uart.line] = NULL;
 	}
 
 	platform_set_drvdata(pdev, NULL);
@@ -672,8 +681,10 @@ static int taurus_uart_resume(struct device *dev)
 {
 	struct taurus_uart_port *port = dev_get_drvdata(dev);
 
-	if (port && port->may_wakeup)
+	if (port && port->may_wakeup) {
+		disable_irq_wake(port->uart.irq);
 		device_set_wakeup_enable(dev, 0);
+	}
 
 	return 0;
 }

@@ -103,9 +103,10 @@ static int rtl_data_setup_tc(struct net_device *dev, enum tc_setup_type type, vo
 		ret = rtl9617c_ni_ets_to_weights(ets, weights);
 		if (ret)
 			return ret;
-		mutex_lock(&port->pon->control_lock);
 		mutex_lock(&port->pon->lock);
-		if (!port->pon->puc_configured || port->llid >= 32) {
+		if (port->pon->gpon_drain.phase || port->pon->xgpon_recovery_phase) {
+			ret = -EBUSY;
+		} else if (!port->pon->puc_configured || port->llid >= 32) {
 			ret = -EOPNOTSUPP;
 		} else {
 			u32 en_mask = rtl_pon_rd(port->pon,
@@ -117,7 +118,6 @@ static int rtl_data_setup_tc(struct net_device *dev, enum tc_setup_type type, vo
 						   weights);
 		}
 		mutex_unlock(&port->pon->lock);
-		mutex_unlock(&port->pon->control_lock);
 		return ret;
 	}
 

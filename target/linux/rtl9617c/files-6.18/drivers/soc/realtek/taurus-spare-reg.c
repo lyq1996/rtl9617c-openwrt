@@ -14,56 +14,42 @@
 
 struct taurus_spare_reg_ctrl {
 	void __iomem *mem;
-	spinlock_t *lock;
 	struct device *dev;
 };
 
-static int taurus_spare_reg_probed;
+static DEFINE_RAW_SPINLOCK(taurus_spare_lock);
 static struct taurus_spare_reg_ctrl *glb_spare_ctrl;
-
-static void taurus_spare_reg_set_bit(unsigned int bit)
-{
-	u32 val;
-	unsigned long flags;
-
-	spin_lock_irqsave(glb_spare_ctrl->lock, flags);
-	val = ioread32(glb_spare_ctrl->mem);
-	val |= BIT(bit);
-	iowrite32(val, glb_spare_ctrl->mem);
-	spin_unlock_irqrestore(glb_spare_ctrl->lock, flags);
-}
-
-static void taurus_spare_reg_clear_bit(unsigned int bit)
-{
-	u32 val;
-	unsigned long flags;
-
-	spin_lock_irqsave(glb_spare_ctrl->lock, flags);
-	val = ioread32(glb_spare_ctrl->mem);
-	val &= ~BIT(bit);
-	iowrite32(val, glb_spare_ctrl->mem);
-	spin_unlock_irqrestore(glb_spare_ctrl->lock, flags);
-}
 
 int taurus_spare_reg_mode_set(unsigned int bit, int mode)
 {
-	if (!taurus_spare_reg_probed) {
+	unsigned long flags;
+	u32 val;
+
+	if (mode != TAURUS_SPARE_GPIO && mode != TAURUS_SPARE_PARALLEL_LED)
+		return -EINVAL;
+
+	raw_spin_lock_irqsave(&taurus_spare_lock, flags);
+	if (!glb_spare_ctrl) {
+		raw_spin_unlock_irqrestore(&taurus_spare_lock, flags);
 		WARN(1, "taurus-spare-reg: calling before probed\n");
 		return -ENODEV;
 	}
 
-	if (bit > TAURUS_SPARE_MAX_COUNT) {
-		dev_err(glb_spare_ctrl->dev, "invalid bit(%d) for PER_SPARE\n",
-			bit);
+	if (bit >= TAURUS_SPARE_MAX_COUNT) {
+		struct device *dev = glb_spare_ctrl->dev;
+
+		raw_spin_unlock_irqrestore(&taurus_spare_lock, flags);
+		dev_err(dev, "invalid bit(%u) for PER_SPARE\n", bit);
 		return -EINVAL;
 	}
 
+	val = ioread32(glb_spare_ctrl->mem);
 	if (mode == TAURUS_SPARE_GPIO)
-		taurus_spare_reg_clear_bit(bit);
-	else if (mode == TAURUS_SPARE_PARALLEL_LED)
-		taurus_spare_reg_set_bit(bit);
+		val &= ~BIT(bit);
 	else
-		return -EINVAL;
+		val |= BIT(bit);
+	iowrite32(val, glb_spare_ctrl->mem);
+	raw_spin_unlock_irqrestore(&taurus_spare_lock, flags);
 
 	return 0;
 }
@@ -72,46 +58,46 @@ EXPORT_SYMBOL(taurus_spare_reg_mode_set);
 static int taurus_spare_reg_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct taurus_spare_reg_ctrl *ctrl;
 	struct resource *reg_res;
-	spinlock_t *lock;
+	unsigned long flags;
 
-	glb_spare_ctrl = devm_kzalloc(dev, sizeof(*glb_spare_ctrl), GFP_KERNEL);
-	if (!glb_spare_ctrl)
+	ctrl = devm_kzalloc(dev, sizeof(*ctrl), GFP_KERNEL);
+	if (!ctrl)
 		return -ENOMEM;
 
-	glb_spare_ctrl->dev = dev;
+	ctrl->dev = dev;
 
 	reg_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!reg_res)
 		return -EINVAL;
 
-	glb_spare_ctrl->mem = devm_ioremap_resource(dev, reg_res);
-	if (IS_ERR(glb_spare_ctrl->mem))
-		return PTR_ERR(glb_spare_ctrl->mem);
+	ctrl->mem = devm_ioremap_resource(dev, reg_res);
+	if (IS_ERR(ctrl->mem))
+		return PTR_ERR(ctrl->mem);
 
-	lock = devm_kzalloc(dev, sizeof(*lock), GFP_KERNEL);
-	if (!lock)
-		return -ENOMEM;
+	dev_set_drvdata(dev, ctrl);
 
-	spin_lock_init(lock);
-	glb_spare_ctrl->lock = lock;
-
-	dev_set_drvdata(dev, glb_spare_ctrl);
-
-	taurus_spare_reg_probed = 1;
+	raw_spin_lock_irqsave(&taurus_spare_lock, flags);
+	glb_spare_ctrl = ctrl;
+	raw_spin_unlock_irqrestore(&taurus_spare_lock, flags);
 
 	return 0;
 }
 
 static void taurus_spare_reg_remove(struct platform_device *pdev)
 {
-	int i;
+	unsigned long flags;
+	u32 val;
 
-	for (i = 0; i < TAURUS_SPARE_MAX_COUNT; i++)
-		taurus_spare_reg_clear_bit(i);
-
-	glb_spare_ctrl = NULL;
-	taurus_spare_reg_probed = 0;
+	raw_spin_lock_irqsave(&taurus_spare_lock, flags);
+	if (glb_spare_ctrl) {
+		val = ioread32(glb_spare_ctrl->mem);
+		val &= ~GENMASK(TAURUS_SPARE_MAX_COUNT - 1, 0);
+		iowrite32(val, glb_spare_ctrl->mem);
+		glb_spare_ctrl = NULL;
+	}
+	raw_spin_unlock_irqrestore(&taurus_spare_lock, flags);
 }
 
 static const struct of_device_id taurus_spare_reg_of_match[] = {

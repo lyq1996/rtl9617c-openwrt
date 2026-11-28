@@ -142,23 +142,14 @@ void rtl_ni_port_fc_ext_set(struct rtl9617c_ni_port *port, bool tx_pause,
 			    bool rx_pause)
 {
 	struct rtl9617c_ni *ni = port->ni;
-	struct net_device *dev;
+	struct net_device *dev = port->dev;
 	bool half_duplex = false;
 
 	rtl_ni_fc_ext_init(ni);
 
-	rcu_read_lock();
-	for_each_netdev_rcu(&init_net, dev) {
-		if (dev->netdev_ops &&
-		    dev->netdev_ops->ndo_open &&
-		    netdev_priv(dev) == port) {
-			if (dev->phydev && dev->phydev->link &&
-			    dev->phydev->duplex == DUPLEX_HALF)
-				half_duplex = true;
-			break;
-		}
-	}
-	rcu_read_unlock();
+	if (dev && dev->phydev && dev->phydev->link &&
+	    dev->phydev->duplex == DUPLEX_HALF)
+		half_duplex = true;
 
 	if (rtl_ni_is_ge(port->id)) {
 		rtl_ni_rmw(ni, RTL_NI_PORT_RX(port->id),
@@ -201,22 +192,16 @@ void rtl_ni_port_fc_ext_set(struct rtl9617c_ni_port *port, bool tx_pause,
 
 void rtl_ni_eee_sync_link(struct rtl9617c_ni_port *port)
 {
-	struct net_device *ndev = NULL, *d;
+	struct net_device *ndev;
 	struct rtl_ni_eee_state *es;
 	bool active;
 
 	if (!port || !rtl_ni_is_ge(port->id) || port->id >= NI_MAX_PORT_SLOTS)
 		return;
 
-	rcu_read_lock();
-	for_each_netdev_rcu(&init_net, d) {
-		if (netdev_priv(d) == port) {
-			ndev = d;
-			break;
-		}
-	}
-	rcu_read_unlock();
+	ndev = port->dev;
 
+	mutex_lock(&qos_lock);
 	es = &qos_st.eee[port->id];
 	active = es->mac_lpi_active;
 	if (ndev && ndev->phydev)
@@ -224,6 +209,7 @@ void rtl_ni_eee_sync_link(struct rtl9617c_ni_port *port)
 			 es->eee_enabled && es->tx_lpi_enabled;
 
 	rtl_ni_ge_apply_eee_hw(port->ni, port->id, active, es->tx_lpi_timer);
+	mutex_unlock(&qos_lock);
 }
 
 int rtl_ni_eee_get(struct net_device *dev, struct ethtool_keee *eee)
@@ -238,12 +224,14 @@ int rtl_ni_eee_get(struct net_device *dev, struct ethtool_keee *eee)
 	if (!ret && port->id < NI_MAX_PORT_SLOTS) {
 		u32 cfg0;
 
+		mutex_lock(&qos_lock);
 		eee->tx_lpi_timer = qos_st.eee[port->id].tx_lpi_timer;
 		if (rtl_ni_is_ge(port->id)) {
 			cfg0 = rtl_ni_read(port->ni,
 					   RTL_NI_PORT_EEE_LPI_CFG0(port->id));
 			eee->tx_lpi_enabled = !!(cfg0 & EEE_LPI_TX_EN);
 		}
+		mutex_unlock(&qos_lock);
 	}
 
 	return ret;
@@ -263,6 +251,7 @@ int rtl_ni_eee_set(struct net_device *dev, struct ethtool_keee *eee)
 		return ret;
 
 	if (port->id < NI_MAX_PORT_SLOTS) {
+		mutex_lock(&qos_lock);
 		es = &qos_st.eee[port->id];
 		es->eee_enabled = eee->eee_enabled;
 		es->tx_lpi_enabled = eee->tx_lpi_enabled;
@@ -272,6 +261,7 @@ int rtl_ni_eee_set(struct net_device *dev, struct ethtool_keee *eee)
 		es->mac_lpi_active = active;
 		rtl_ni_ge_apply_eee_hw(port->ni, port->id, active,
 				       eee->tx_lpi_timer);
+		mutex_unlock(&qos_lock);
 	}
 
 	return 0;
@@ -286,11 +276,13 @@ int rtl_ni_mac_enable_tx_lpi(struct phylink_config *config, u32 timer,
 		return 0;
 
 	port = netdev_priv(to_net_dev(config->dev));
+	mutex_lock(&qos_lock);
 	if (port->id < NI_MAX_PORT_SLOTS) {
 		qos_st.eee[port->id].mac_lpi_active = true;
 		qos_st.eee[port->id].tx_lpi_timer = timer;
 	}
 	rtl_ni_ge_apply_eee_hw(port->ni, port->id, true, timer);
+	mutex_unlock(&qos_lock);
 
 	return 0;
 }
@@ -303,9 +295,11 @@ void rtl_ni_mac_disable_tx_lpi(struct phylink_config *config)
 		return;
 
 	port = netdev_priv(to_net_dev(config->dev));
+	mutex_lock(&qos_lock);
 	if (port->id < NI_MAX_PORT_SLOTS)
 		qos_st.eee[port->id].mac_lpi_active = false;
 	rtl_ni_ge_apply_eee_hw(port->ni, port->id, false, 0);
+	mutex_unlock(&qos_lock);
 }
 
 static int l2te_port_shaper_set(struct rtl9617c_ni *ni, unsigned int port_id,

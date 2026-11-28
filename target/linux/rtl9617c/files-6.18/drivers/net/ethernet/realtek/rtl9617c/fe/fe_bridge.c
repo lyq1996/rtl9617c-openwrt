@@ -270,9 +270,15 @@ static void rtl_fe_bridge_hook_dev(struct rtl_fe_bridge *bridge,
 	}
 
 	first = !rtl_fe_bridge_net_hooked(bridge, dev_net(dev));
-	if (first)
-		nf_register_net_hooks(dev_net(dev), bridge->hooks,
-				      ARRAY_SIZE(bridge->hooks));
+	if (first) {
+		ret = nf_register_net_hooks(dev_net(dev), bridge->hooks,
+					    ARRAY_SIZE(bridge->hooks));
+		if (ret) {
+			nf_unregister_net_hook(dev_net(dev), &hook->ops);
+			kfree(hook);
+			return;
+		}
+	}
 	list_add_tail(&hook->list, &bridge->ingress_hooks);
 }
 
@@ -352,8 +358,7 @@ static unsigned int rtl_fe_bridge_forward(void *priv, struct sk_buff *skb,
 
 	spin_lock_bh(&bridge->pending_lock);
 	next = (bridge->write + 1) % FE_BRIDGE_PENDING;
-	if (next != bridge->read) {
-		get_net(packet.net);
+	if (next != bridge->read && maybe_get_net(packet.net)) {
 		bridge->pending[bridge->write] = packet;
 		bridge->write = next;
 	}
@@ -802,6 +807,8 @@ void rtl_fe_bridge_stop(struct rtl_fe_bridge *bridge)
 	unregister_switchdev_notifier(&bridge->switchdev_nb);
 	cancel_delayed_work_sync(&bridge->work);
 	rtl_fe_bridge_drain(bridge);
+	mutex_lock(&bridge->fe->lock);
 	bridge->fe->bridge = NULL;
+	mutex_unlock(&bridge->fe->lock);
 	kvfree(bridge);
 }

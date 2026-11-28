@@ -93,7 +93,7 @@ index e9a2fdb..ec6f09c 100644
  #include <net/addrconf.h>
  #include <net/ip6_tunnel.h>
  #include <net/xfrm.h>
-@@ -2002,6 +2004,82 @@ int ip6_tnl_encap_setup(struct ip6_tnl *t,
+@@ -2002,6 +2004,87 @@ int ip6_tnl_encap_setup(struct ip6_tnl *t,
  }
  EXPORT_SYMBOL_GPL(ip6_tnl_encap_setup);
  
@@ -144,9 +144,14 @@ index e9a2fdb..ec6f09c 100644
 +			return -EOPNOTSUPP;
 +		}
 +	} else {
-+		const struct in6_addr *nh = rt6_nexthop(dst_rt6_info(dst),
-+							&fl6.daddr);
++		const struct in6_addr *nh;
 +
++		if (outdev->type != ARPHRD_ETHER ||
++		    outdev->addr_len != ETH_ALEN) {
++			dst_release(dst);
++			return -EOPNOTSUPP;
++		}
++		nh = rt6_nexthop(dst_rt6_info(dst), &fl6.daddr);
 +		n = __ipv6_neigh_lookup_noref(outdev, nh);
 +		if (!n || !(READ_ONCE(n->nud_state) & NUD_VALID)) {
 +			dst_release(dst);
@@ -176,7 +181,7 @@ index e9a2fdb..ec6f09c 100644
  static const struct net_device_ops ip6_tnl_netdev_ops = {
  	.ndo_init	= ip6_tnl_dev_init,
  	.ndo_uninit	= ip6_tnl_dev_uninit,
-@@ -2010,6 +2088,7 @@ static const struct net_device_ops ip6_tnl_netdev_ops = {
+@@ -2010,6 +2093,7 @@ static const struct net_device_ops ip6_tnl_netdev_ops = {
  	.ndo_change_mtu = ip6_tnl_change_mtu,
  	.ndo_get_stats64 = dev_get_tstats64,
  	.ndo_get_iflink = ip6_tnl_get_iflink,
@@ -205,7 +210,7 @@ index ae39e4c..f5bced1 100644
  #include <net/udp.h>
  #include <net/icmp.h>
  #include <net/ip_tunnels.h>
-@@ -1391,6 +1394,81 @@ ipip6_tunnel_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+@@ -1391,6 +1394,86 @@ ipip6_tunnel_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
  	}
  }
  
@@ -253,6 +258,11 @@ index ae39e4c..f5bced1 100644
 +			return -EOPNOTSUPP;
 +		}
 +	} else {
++		if (outdev->type != ARPHRD_ETHER ||
++		    outdev->addr_len != ETH_ALEN) {
++			ip_rt_put(rt);
++			return -EOPNOTSUPP;
++		}
 +		if (rt->rt_gw_family == AF_INET6) {
 +			n = __ipv6_neigh_lookup_noref_stub(outdev, &rt->rt_gw6);
 +		} else {
@@ -287,7 +297,7 @@ index ae39e4c..f5bced1 100644
  static const struct net_device_ops ipip6_netdev_ops = {
  	.ndo_init	= ipip6_tunnel_init,
  	.ndo_uninit	= ipip6_tunnel_uninit,
-@@ -1398,6 +1476,7 @@ static const struct net_device_ops ipip6_netdev_ops = {
+@@ -1398,6 +1481,7 @@ static const struct net_device_ops ipip6_netdev_ops = {
  	.ndo_siocdevprivate = ipip6_tunnel_siocdevprivate,
  	.ndo_get_iflink = ip_tunnel_get_iflink,
  	.ndo_tunnel_ctl = ipip6_tunnel_ctl,

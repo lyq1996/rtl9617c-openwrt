@@ -86,12 +86,21 @@ static struct taurus_soc_priv *glb_soc;
 
 static int taurus_smc_buff_read(u32 smc_id, void *buf, size_t len)
 {
+	size_t alloc_len = max_t(size_t, len, ARCH_DMA_MINALIGN);
+	void *tmp;
 	phys_addr_t phyaddr;
 
-	phyaddr = virt_to_phys(buf);
-	arch_sync_dma_for_cpu(phyaddr, len, DMA_BIDIRECTIONAL);
+	tmp = kzalloc(alloc_len, GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+
+	phyaddr = virt_to_phys(tmp);
+	arch_sync_dma_for_device(phyaddr, alloc_len, DMA_FROM_DEVICE);
 	arm_smccc_smc(smc_id, 0, 0, phyaddr, 0, 0, 0, 0,
 		      &(struct arm_smccc_res){0});
+	arch_sync_dma_for_cpu(phyaddr, alloc_len, DMA_FROM_DEVICE);
+	memcpy(buf, tmp, len);
+	kfree(tmp);
 	return 0;
 }
 
@@ -153,7 +162,11 @@ static void taurus_clock_probe(struct taurus_soc_priv *soc, void __iomem *base)
 		}
 	}
 
-	soc->cci_clk = soc->epll / ((eplldiv2 >> 8) / 2);
+	{
+		u32 cci_div = ((eplldiv2 >> 8) & 0x7f) / 2;
+
+		soc->cci_clk = cci_div ? soc->epll / cci_div : soc->epll;
+	}
 
 	if ((eplldiv >> 24) & 0x7f)
 		soc->lsaxi_clk = soc->epll * 2 / ((eplldiv >> 24) & 0x7f);
@@ -220,8 +233,8 @@ static int taurus_soc_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	base = devm_ioremap(&pdev->dev, mem->start, resource_size(mem));
-	if (IS_ERR(base))
-		return PTR_ERR(base);
+	if (!base)
+		return -ENOMEM;
 
 	v = readl(base);
 	if (TAURUS_CHIP_ID_GET(v) != TAURUS_CHIP_ID_CA8277C)
@@ -287,6 +300,7 @@ static struct platform_driver taurus_soc_driver = {
 	.driver = {
 		.name = "taurus-soc",
 		.of_match_table = taurus_soc_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(taurus_soc_driver);

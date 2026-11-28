@@ -193,14 +193,19 @@ static void rtl_ptp_tx_work(struct work_struct *work)
 		schedule_delayed_work(&ptp_st.tx_work, 1);
 }
 
+static DEFINE_MUTEX(ptp_init_lock);
+
 void rtl_ni_ptp_init_dev(struct rtl9617c_ni *ni, struct device *dev)
 {
 	void __iomem *glb;
 
-	if (!ni || !dev || ptp_st.initialized)
+	if (!ni || !dev || smp_load_acquire(&ptp_st.initialized))
 		return;
 
-	ptp_st.initialized = true;
+	mutex_lock(&ptp_init_lock);
+	if (ptp_st.initialized)
+		goto out;
+
 	ptp_st.ni = ni;
 	mutex_init(&ptp_st.lock);
 	spin_lock_init(&ptp_st.tx_lock);
@@ -215,7 +220,7 @@ void rtl_ni_ptp_init_dev(struct rtl9617c_ni *ni, struct device *dev)
 
 	ptp_st.ptp_base = devm_ioremap(dev, RTL_PTP_BASE_PHYS, 0x100);
 	if (!ptp_st.ptp_base)
-		return;
+		goto out;
 
 	writel(NI_PTP_DEFAULT_PERIOD, ptp_st.ptp_base + RTL_PTP_TIMER_CFG_0);
 	writel(readl(ptp_st.ptp_base + RTL_PTP_PPS_CFG_0) |
@@ -243,14 +248,20 @@ void rtl_ni_ptp_init_dev(struct rtl9617c_ni *ni, struct device *dev)
 			 PTR_ERR(ptp_st.ptp_clock));
 		ptp_st.ptp_clock = NULL;
 	}
+	smp_store_release(&ptp_st.initialized, true);
+out:
+	mutex_unlock(&ptp_init_lock);
 }
 
 void rtl_ni_ptp_cleanup(void)
 {
 	int p;
 
-	if (!ptp_st.initialized)
+	mutex_lock(&ptp_init_lock);
+	if (!ptp_st.initialized) {
+		mutex_unlock(&ptp_init_lock);
 		return;
+	}
 
 	cancel_delayed_work_sync(&ptp_st.tx_work);
 	for (p = 0; p < NI_PTP_PORTS; p++) {
@@ -266,16 +277,13 @@ void rtl_ni_ptp_cleanup(void)
 	}
 	ptp_st.ptp_base = NULL;
 	ptp_st.ni = NULL;
-	ptp_st.initialized = false;
+	smp_store_release(&ptp_st.initialized, false);
+	mutex_unlock(&ptp_init_lock);
 }
 
 int rtl_ni_ptp_get_ts_info(struct net_device *dev,
 			   struct kernel_ethtool_ts_info *info)
 {
-	struct rtl9617c_ni_port *port = netdev_priv(dev);
-
-	rtl_ni_ptp_init_dev(port->ni, dev->dev.parent);
-
 	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
 				SOF_TIMESTAMPING_RX_HARDWARE |
 				SOF_TIMESTAMPING_TX_HARDWARE |
@@ -314,8 +322,6 @@ int rtl_ni_ptp_hwtstamp_set(struct net_device *dev,
 	if (port->id >= NI_PTP_PORTS)
 		return -EINVAL;
 
-	rtl_ni_ptp_init_dev(port->ni, dev->dev.parent);
-
 	switch (cfg->tx_type) {
 	case HWTSTAMP_TX_OFF:
 		ptp_st.tx_enable[port->id] = false;
@@ -351,25 +357,46 @@ int rtl_ni_ptp_hwtstamp_set(struct net_device *dev,
 	return 0;
 }
 
-void rtl_ni_ptp_tx_submit(struct rtl9617c_ni_port *port, struct sk_buff *skb)
+struct sk_buff *rtl_ni_ptp_tx_prepare(struct rtl9617c_ni_port *port,
+				      struct sk_buff *skb)
 {
-	unsigned long flags;
+	struct sk_buff *clone;
 
 	if (!port || !skb || port->id >= NI_PTP_PORTS)
-		return;
-	if (!ptp_st.ptp_clock || !ptp_st.tx_enable[port->id])
-		return;
+		return NULL;
+	if (!smp_load_acquire(&ptp_st.initialized) ||
+	    !ptp_st.ptp_clock || !ptp_st.tx_enable[port->id])
+		return NULL;
 	if (!(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP))
-		return;
+		return NULL;
+
+	clone = skb_clone_sk(skb);
+	if (!clone)
+		return NULL;
 
 	skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
+	return clone;
+}
+
+void rtl_ni_ptp_tx_commit(struct rtl9617c_ni_port *port,
+			  struct sk_buff *ts_skb)
+{
+	struct sk_buff *old;
+	unsigned long flags;
+
+	if (!port || !ts_skb || port->id >= NI_PTP_PORTS) {
+		dev_kfree_skb_any(ts_skb);
+		return;
+	}
 
 	spin_lock_irqsave(&ptp_st.tx_lock, flags);
-	if (ptp_st.tx_skb[port->id])
-		consume_skb(ptp_st.tx_skb[port->id]);
-	ptp_st.tx_skb[port->id] = skb_get(skb);
+	old = ptp_st.tx_skb[port->id];
+	ptp_st.tx_skb[port->id] = ts_skb;
 	ptp_st.tx_stamp_jiffies[port->id] = jiffies;
 	spin_unlock_irqrestore(&ptp_st.tx_lock, flags);
+
+	if (old)
+		dev_consume_skb_any(old);
 
 	schedule_delayed_work(&ptp_st.tx_work, 1);
 }

@@ -532,9 +532,11 @@ static ssize_t rtl_fe_napt6_debugfs_write(struct file *file,
 		ret = rtl_fe_napt6_prefix_add(fe, prefix, &index);
 		if (ret)
 			goto failed;
+		mutex_lock(&n->lock);
 		snprintf(n->last, sizeof(n->last),
 			 "prefix-add %016llx -> %u", (unsigned long long)prefix,
 			 index);
+		mutex_unlock(&n->lock);
 		return count;
 	}
 
@@ -547,7 +549,9 @@ static ssize_t rtl_fe_napt6_debugfs_write(struct file *file,
 		ret = rtl_fe_napt6_prefix_del(fe, index);
 		if (ret)
 			goto failed;
+		mutex_lock(&n->lock);
 		snprintf(n->last, sizeof(n->last), "prefix-del %u ok", index);
+		mutex_unlock(&n->lock);
 		return count;
 	}
 
@@ -557,16 +561,20 @@ static ssize_t rtl_fe_napt6_debugfs_write(struct file *file,
 		ret = rtl_fe_napt6_prefix_get(fe, index, &prefix, &refs);
 		if (ret)
 			goto failed;
+		mutex_lock(&n->lock);
 		snprintf(n->last, sizeof(n->last),
 			 "prefix-get %u refs=%u hw=%016llx", index, refs,
 			 (unsigned long long)prefix);
+		mutex_unlock(&n->lock);
 		return count;
 	}
 
 	return -EINVAL;
 
 failed:
+	mutex_lock(&n->lock);
 	snprintf(n->last, sizeof(n->last), "%s failed: %d", cmd, ret);
+	mutex_unlock(&n->lock);
 	return ret;
 }
 

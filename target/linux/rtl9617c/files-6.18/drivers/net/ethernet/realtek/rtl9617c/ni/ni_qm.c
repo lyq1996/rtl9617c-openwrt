@@ -1214,7 +1214,8 @@ int rtl_ni_qm_start(struct rtl9617c_ni *ni)
 		     FIELD_PREP(RTL_L2TM_ES_SCH_VOQ_EN, 0xff) |
 		     FIELD_PREP(RTL_L2TM_ES_SCH_SPEED, 6));
 	rtl_ni_rmw(ni, RTL_TE_CB_CTRL, 0, RTL_TE_CB_SCAN_EN);
-	rtl_ni_rmw(ni, RTL_TE_GLB_CTRL, 0, RTL_TE_GLB_TAILDROP_EN);
+	regmap_update_bits(ni->regs, RTL_TE_GLB_CTRL, RTL_TE_GLB_TAILDROP_EN,
+			   RTL_TE_GLB_TAILDROP_EN);
 	rtl_ni_write(ni, RTL_QM_ES_CTRL,
 		     QM_ES_CTRL_RUN(GENMASK(qm->num_rxq - 1, 0)));
 	rtl_ni_rmw(ni, RTL_QM_ES_CTRL1, 0, RTL_QM_ES_CTRL1_PUC_EN);

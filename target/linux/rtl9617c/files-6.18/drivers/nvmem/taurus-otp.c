@@ -65,6 +65,14 @@ static int taurus_otp_probe(struct platform_device *pdev)
 	if (!res)
 		return -EINVAL;
 
+	otp_offset = res->start & (TAURUS_OTP_SIZE - 1);
+	if (resource_size(res) > TAURUS_OTP_SIZE ||
+	    otp_offset > TAURUS_OTP_SIZE - resource_size(res)) {
+		dev_err(&pdev->dev, "OTP region out of bounds (off=0x%x size=%pa)\n",
+			otp_offset, &res->end);
+		return -EINVAL;
+	}
+
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -74,9 +82,10 @@ static int taurus_otp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	phyaddr = virt_to_phys(smc_buf);
-	arch_sync_dma_for_cpu(phyaddr, TAURUS_OTP_SIZE, DMA_BIDIRECTIONAL);
+	arch_sync_dma_for_device(phyaddr, TAURUS_OTP_SIZE, DMA_FROM_DEVICE);
 	arm_smccc_smc(TAURUS_SVC_OTP_GPHY_PATCH_READ, 0, 0, phyaddr, 0, 0, 0, 0,
 		      &smc_res);
+	arch_sync_dma_for_cpu(phyaddr, TAURUS_OTP_SIZE, DMA_FROM_DEVICE);
 	if (smc_res.a0) {
 		dev_err(&pdev->dev, "OTP read via SMC failed: 0x%lx\n",
 			smc_res.a0);
@@ -90,7 +99,6 @@ static int taurus_otp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	otp_offset = res->start & (TAURUS_OTP_SIZE - 1);
 	memcpy(otp_buf, smc_buf + otp_offset, resource_size(res));
 	kfree(smc_buf);
 

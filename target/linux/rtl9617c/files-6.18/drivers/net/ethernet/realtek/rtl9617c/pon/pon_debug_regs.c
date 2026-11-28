@@ -17,7 +17,7 @@
 #include <linux/uaccess.h>
 #include "pon/pon.h"
 #include "pon/pon_debug.h"
-#define PON_REG_MAX_OFFSET 0x20000
+#define PON_REG_MAX_OFFSET 0xc000
 
 /* Allowed modes per window; 0 means every mode. */
 #define PON_REG_MODES_EPON	(BIT(RTL_PON_EPON_1G) | BIT(RTL_PON_EPON_D10G) | \
@@ -55,7 +55,7 @@ static const struct pon_reg_window pon_reg_windows[] = {
 	{ "gpon_ploam",		PON_REG_MAC, 0x60e0, 0x6118, PON_REG_MODES_GPON },
 	{ "xgpon_ctrl",		PON_REG_MAC, 0x4000, 0x4004, PON_REG_MODES_XG },
 	{ "xgpon_state",	PON_REG_MAC, 0x4d30, 0x4d34, PON_REG_MODES_XG },
-	{ "pon_control",	PON_REG_CONTROL, 0x0000, 0x0004, 0 },
+	{ "pon_control",	PON_REG_CONTROL, 0x0000, 0x0000, 0 },
 	{ "epon_control",	PON_REG_EPON_CONTROL, 0x0000, 0x0000, PON_REG_MODES_EPON },
 	{ "top_irq",		PON_REG_TOP, 0x0000, 0x0004, 0 },
 	{ "optical_status",	PON_REG_OPTICAL_STATUS, 0x0000, 0x0000, 0 },
@@ -133,7 +133,7 @@ static ssize_t pon_reg_write_write(struct file *file, const char __user *ubuf,
 	buf[count] = '\0';
 	if (sscanf(buf, "%x %x", &offset, &value) != 2)
 		return -EINVAL;
-	if ((offset & 3) || offset + 4 > PON_REG_MAX_OFFSET)
+	if ((offset & 3) || offset >= PON_REG_MAX_OFFSET)
 		return -EINVAL;
 	/*
 	 * Experimental channel only: no locking, no ownership, no filtering

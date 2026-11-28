@@ -175,6 +175,9 @@ static void taurus_i2c_fsm(struct taurus_i2c_data *drv_data)
 {
 	struct i2c_msg *msg = drv_data->msg;
 
+	if (!msg || drv_data->state == TAURUS_I2C_STATE_IDLE)
+		return;
+
 	if ((drv_data->bytes_left != 0) &&
 	    ((drv_data->ack & TAURUS_BIW_ACK_ACK_OUT) ||
 	     (drv_data->ack & TAURUS_BIW_ACK_AL))) {
@@ -252,6 +255,8 @@ static void taurus_i2c_fsm(struct taurus_i2c_data *drv_data)
 					      TAURUS_BIW_CTRL_WRITE |
 					      TAURUS_BIW_CTRL_STOP);
 		} else {
+			drv_data->msg = NULL;
+			drv_data->state = TAURUS_I2C_STATE_IDLE;
 			drv_data->block = 0;
 			wake_up(&drv_data->waitq);
 		}
@@ -273,6 +278,8 @@ static void taurus_i2c_fsm(struct taurus_i2c_data *drv_data)
 					      TAURUS_BIW_CTRL_ACK_IN |
 					      TAURUS_BIW_CTRL_STOP);
 		} else {
+			drv_data->msg = NULL;
+			drv_data->state = TAURUS_I2C_STATE_IDLE;
 			drv_data->block = 0;
 			wake_up(&drv_data->waitq);
 		}
@@ -283,6 +290,7 @@ static void taurus_i2c_fsm(struct taurus_i2c_data *drv_data)
 		if (!drv_data->rc)
 			drv_data->rc = -EIO;
 
+		drv_data->msg = NULL;
 		drv_data->state = TAURUS_I2C_STATE_IDLE;
 
 		drv_data->block = 0;
@@ -293,9 +301,11 @@ static void taurus_i2c_fsm(struct taurus_i2c_data *drv_data)
 static irqreturn_t taurus_i2c_intr(int irq, void *param)
 {
 	struct taurus_i2c_data *drv_data = param;
-	irqreturn_t rc = IRQ_NONE;
+	unsigned long flags;
 	u32 reg_biw_ctrl;
 	u32 reg_biw_int0;
+
+	spin_lock_irqsave(&drv_data->lock, flags);
 
 	taurus_wr_reg(drv_data, TAURUS_BIW_IE0, 0);
 
@@ -305,17 +315,19 @@ static irqreturn_t taurus_i2c_intr(int irq, void *param)
 
 	reg_biw_ctrl = taurus_rd_reg(drv_data, TAURUS_BIW_CTRL);
 	if (!(reg_biw_ctrl & TAURUS_BIW_CTRL_DONE))
-		dev_err(&drv_data->adapter.dev, "taurus-i2c: no done signal\n");
+		dev_err_ratelimited(&drv_data->adapter.dev,
+				    "taurus-i2c: no done signal\n");
 	taurus_wr_reg(drv_data, TAURUS_BIW_CTRL, reg_biw_ctrl);
 
 	drv_data->ack = taurus_rd_reg(drv_data, TAURUS_BIW_ACK);
 
 	taurus_i2c_fsm(drv_data);
-	rc = IRQ_HANDLED;
 
 	taurus_wr_reg(drv_data, TAURUS_BIW_IE0, 1);
 
-	return rc;
+	spin_unlock_irqrestore(&drv_data->lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 static void taurus_i2c_prepare_for_io(struct taurus_i2c_data *drv_data,
@@ -344,21 +356,25 @@ static void taurus_i2c_prepare_for_io(struct taurus_i2c_data *drv_data,
 
 static void taurus_i2c_wait_for_completion(struct taurus_i2c_data *drv_data)
 {
-	unsigned long time_left;
+	unsigned long time_left, flags;
 
 	time_left = wait_event_timeout(drv_data->waitq, !drv_data->block,
 				       drv_data->adapter.timeout);
 
 	if (!time_left) {
-		spin_lock(&drv_data->lock);
+		spin_lock_irqsave(&drv_data->lock, flags);
+		taurus_wr_reg(drv_data, TAURUS_BIW_IE0, 0);
 		taurus_dump_regs(drv_data);
 		drv_data->rc = -ETIMEDOUT;
+		drv_data->msg = NULL;
 		drv_data->state = TAURUS_I2C_STATE_IDLE;
 		dev_err(&drv_data->adapter.dev,
 			"taurus-i2c: I2C bus locked, block: %d, time_left: %d\n",
 			drv_data->block, (int)time_left);
 		drv_data->block = 0;
-		spin_unlock(&drv_data->lock);
+		spin_unlock_irqrestore(&drv_data->lock, flags);
+
+		synchronize_irq(drv_data->irq);
 
 		if (drv_data->adapter.bus_recovery_info)
 			i2c_recover_bus(&drv_data->adapter);
@@ -370,10 +386,13 @@ static void taurus_i2c_wait_for_completion(struct taurus_i2c_data *drv_data)
 static int taurus_i2c_execute_msg(struct taurus_i2c_data *drv_data,
 				  struct i2c_msg *msg)
 {
+	unsigned long flags;
+	int rc;
+
 	if (msg->len == 0)
 		return -EINVAL;
 
-	spin_lock(&drv_data->lock);
+	spin_lock_irqsave(&drv_data->lock, flags);
 
 	taurus_i2c_prepare_for_io(drv_data, msg);
 
@@ -385,11 +404,16 @@ static int taurus_i2c_execute_msg(struct taurus_i2c_data *drv_data,
 	drv_data->block = 1;
 	taurus_i2c_fsm(drv_data);
 
-	spin_unlock(&drv_data->lock);
+	spin_unlock_irqrestore(&drv_data->lock, flags);
 
 	taurus_i2c_wait_for_completion(drv_data);
 
-	return drv_data->rc;
+	spin_lock_irqsave(&drv_data->lock, flags);
+	drv_data->msg = NULL;
+	rc = drv_data->rc;
+	spin_unlock_irqrestore(&drv_data->lock, flags);
+
+	return rc;
 }
 
 static u32 taurus_i2c_functionality(struct i2c_adapter *adap)
@@ -606,17 +630,9 @@ static int taurus_i2c_probe(struct platform_device *pd)
 	if (rc)
 		goto exit_clk;
 
+	drv_data->irq = platform_get_irq(pd, 0);
 	if (drv_data->irq < 0) {
-		rc = -ENXIO;
-		goto exit_clk;
-	}
-	dev_info(&pd->dev, "irq %d\n", drv_data->irq);
-	rc = devm_request_irq(&pd->dev, drv_data->irq, taurus_i2c_intr, 0,
-			      TAURUS_I2C_CTLR_NAME, drv_data);
-	if (rc) {
-		dev_err(&drv_data->adapter.dev,
-			"taurus-i2c: can't register intr handler irq%d: %d\n",
-			drv_data->irq, rc);
+		rc = drv_data->irq;
 		goto exit_clk;
 	}
 
@@ -635,15 +651,28 @@ static int taurus_i2c_probe(struct platform_device *pd)
 
 	taurus_i2c_hw_init(drv_data);
 
+	dev_info(&pd->dev, "irq %d\n", drv_data->irq);
+	rc = devm_request_irq(&pd->dev, drv_data->irq, taurus_i2c_intr, 0,
+			      TAURUS_I2C_CTLR_NAME, drv_data);
+	if (rc) {
+		dev_err(&pd->dev,
+			"taurus-i2c: can't register intr handler irq%d: %d\n",
+			drv_data->irq, rc);
+		goto exit_hw;
+	}
+
 	rc = i2c_add_numbered_adapter(&drv_data->adapter);
 	if (rc != 0) {
-		dev_err(&drv_data->adapter.dev,
+		dev_err(&pd->dev,
 			"taurus-i2c: can't add i2c adapter, rc: %d\n", -rc);
-		goto exit_clk;
+		devm_free_irq(&pd->dev, drv_data->irq, drv_data);
+		goto exit_hw;
 	}
 
 	return 0;
 
+exit_hw:
+	taurus_i2c_hw_fini(drv_data);
 exit_clk:
 	if (!IS_ERR(drv_data->clk))
 		clk_disable_unprepare(drv_data->clk);
@@ -656,6 +685,8 @@ static void taurus_i2c_remove(struct platform_device *dev)
 	struct taurus_i2c_data *drv_data = platform_get_drvdata(dev);
 
 	i2c_del_adapter(&drv_data->adapter);
+	taurus_wr_reg(drv_data, TAURUS_BIW_IE0, 0);
+	devm_free_irq(&dev->dev, drv_data->irq, drv_data);
 	taurus_i2c_hw_fini(drv_data);
 	if (!IS_ERR(drv_data->clk))
 		clk_disable_unprepare(drv_data->clk);

@@ -49,7 +49,10 @@ int rtl_ni_ptp_hwtstamp_get(struct net_device *dev,
 int rtl_ni_ptp_hwtstamp_set(struct net_device *dev,
 			    struct kernel_hwtstamp_config *cfg,
 			    struct netlink_ext_ack *extack);
-void rtl_ni_ptp_tx_submit(struct rtl9617c_ni_port *port, struct sk_buff *skb);
+struct sk_buff *rtl_ni_ptp_tx_prepare(struct rtl9617c_ni_port *port,
+				      struct sk_buff *skb);
+void rtl_ni_ptp_tx_commit(struct rtl9617c_ni_port *port,
+			  struct sk_buff *ts_skb);
 int rtl_ni_ptp_read_rx_latch(struct rtl9617c_ni_port *port, u64 *ns_out);
 
 /* L2FE hardware FDB, membership & VLAN engine (implemented in ni_l2fe.c) */

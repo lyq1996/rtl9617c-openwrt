@@ -1,0 +1,32 @@
+From: RTL9617C Maintainers <dev@openwrt.org>
+Subject: [PATCH] mtd: nand: bbt: avoid GENMASK shift-out-of-bounds across word boundary
+
+When a BBT status entry straddles a BITS_PER_LONG boundary (e.g., 3-bit
+entries at offs=62 or offs=63 on 64-bit), offs + bits_per_block - 1
+exceeds BITS_PER_LONG - 1, causing GENMASK() to shift by a negative /
+wrapped exponent (triggering UBSAN shift-out-of-bounds and failing to
+clear the upper bits of pos[0] on arm64).
+
+Clamp the upper bit index for pos[0] to BITS_PER_LONG - 1; the remaining
+bits in pos[1] are already masked and updated immediately below.
+
+--- a/drivers/mtd/nand/bbt.c
++++ b/drivers/mtd/nand/bbt.c
+@@ -9,6 +9,7 @@
+ 
+ #define pr_fmt(fmt)	"nand-bbt: " fmt
+ 
++#include <linux/minmax.h>
+ #include <linux/mtd/nand.h>
+ #include <linux/slab.h>
+ 
+@@ -113,7 +114,8 @@ int nanddev_bbt_set_block_status(struct
+ 	if (entry >= nanddev_neraseblocks(nand))
+ 		return -ERANGE;
+ 
+-	pos[0] &= ~GENMASK(offs + bits_per_block - 1, offs);
++	pos[0] &= ~GENMASK(min_t(unsigned int, offs + bits_per_block,
++				 BITS_PER_LONG) - 1, offs);
+ 	pos[0] |= val << offs;
+ 
+ 	if (bits_per_block + offs > BITS_PER_LONG) {

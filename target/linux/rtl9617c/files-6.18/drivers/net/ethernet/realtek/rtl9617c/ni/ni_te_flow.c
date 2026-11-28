@@ -317,7 +317,9 @@ static int te_policer_ready(struct rtl_te_flow *te)
 
 	val = te_read(te, L3TE_TE_GLB_CTRL);
 	if (!(val & L3TE_TE_GLB_POLICER_EN)) {
-		te_write(te, L3TE_TE_GLB_CTRL, val | L3TE_TE_GLB_POLICER_EN);
+		regmap_update_bits(te->regs, L3TE_TE_GLB_CTRL,
+				   L3TE_TE_GLB_POLICER_EN,
+				   L3TE_TE_GLB_POLICER_EN);
 		val = te_read(te, L3TE_TE_GLB_CTRL);
 		if (!(val & L3TE_TE_GLB_POLICER_EN))
 			return -EIO;
@@ -389,7 +391,7 @@ static int te_flow_update_locked(struct rtl_te_flow *te, unsigned int idx,
 	u32 words[3];
 	int ret;
 
-	if (idx >= L3TE_POL_FLOW_SLOTS || !test_bit(idx, te->flow_slots))
+	if (idx >= RTL_TE_FLOW_SLOT_COUNT || !test_bit(idx, te->flow_slots))
 		return -EINVAL;
 
 	ret = te_policer_encode(cir_bps, pir_bps, cbs, pbs, &p);
@@ -406,7 +408,7 @@ static int te_flow_free_locked(struct rtl_te_flow *te, unsigned int idx)
 	u32 words[3];
 	int ret;
 
-	if (idx >= L3TE_POL_FLOW_SLOTS || !test_bit(idx, te->flow_slots))
+	if (idx >= RTL_TE_FLOW_SLOT_COUNT || !test_bit(idx, te->flow_slots))
 		return -EINVAL;
 
 	te_policer_sentinel(words);
@@ -445,7 +447,9 @@ static int te_group_depth_ready(struct rtl_te_flow *te)
 
 	glb = te_read(te, L3TE_TE_GLB_CTRL);
 	if (!(glb & L3TE_TE_GLB_POL_GRP_64)) {
-		te_write(te, L3TE_TE_GLB_CTRL, glb | L3TE_TE_GLB_POL_GRP_64);
+		regmap_update_bits(te->regs, L3TE_TE_GLB_CTRL,
+				   L3TE_TE_GLB_POL_GRP_64,
+				   L3TE_TE_GLB_POL_GRP_64);
 		glb = te_read(te, L3TE_TE_GLB_CTRL);
 		if (!(glb & L3TE_TE_GLB_POL_GRP_64))
 			return -EIO;
@@ -2369,14 +2373,14 @@ static int te_cmd_wred_ctrl(struct rtl_te_flow *te, char **tok,
 	spin_lock_irqsave(&te->lock, flags);
 	if (ena)
 		te_hostpol_pm_ready(te);
-	val = te_read(te, L3TE_TE_GLB_CTRL);
-	val &= ~(L3TE_GLB_CTRL_WRED_EN | L3TE_GLB_CTRL_MARK_ECN_EN |
-		 L3TE_GLB_CTRL_WRED_ECN_EN);
+	val = 0;
 	if (ena)
 		val |= L3TE_GLB_CTRL_WRED_EN;
 	if (ecn)
 		val |= L3TE_GLB_CTRL_WRED_ECN_EN | L3TE_GLB_CTRL_MARK_ECN_EN;
-	te_write(te, L3TE_TE_GLB_CTRL, val);
+	regmap_update_bits(te->regs, L3TE_TE_GLB_CTRL,
+			   L3TE_GLB_CTRL_WRED_EN | L3TE_GLB_CTRL_MARK_ECN_EN |
+			   L3TE_GLB_CTRL_WRED_ECN_EN, val);
 
 	arb = te_read(te, L3TE_L2FE_ARB_CTRL);
 	if (ecn)
@@ -3443,6 +3447,11 @@ int rtl_te_flow_init(struct rtl9617c_ni *ni)
 
 	te_flow_debugfs_init(te);
 	return 0;
+}
+
+void rtl_te_flow_debugfs_exit(struct rtl_te_flow *te)
+{
+	te_flow_debugfs_exit(te);
 }
 
 void rtl_te_flow_exit(struct rtl9617c_ni *ni)

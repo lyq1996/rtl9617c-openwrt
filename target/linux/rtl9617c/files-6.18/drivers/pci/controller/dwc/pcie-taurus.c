@@ -360,7 +360,8 @@ static void taurus_pcie_serdes_load_cfg(struct taurus_pcie *pcie)
 		for (i = 0; i < pcie->cfg_cnt[lane]; i++) {
 			u32 off = pcie->cfg[lane][i].addr;
 
-			if (off < pcie->serdes_size)
+			if (off + sizeof(u32) <= pcie->serdes_size &&
+			    IS_ALIGNED(off, sizeof(u32)))
 				writel(pcie->cfg[lane][i].val,
 				       pcie->serdes_base + off);
 		}
@@ -1113,6 +1114,8 @@ static void taurus_pcie_host_deinit(struct dw_pcie_rp *pp)
 	struct taurus_pcie *pcie = to_taurus_pcie(pci);
 
 	taurus_pcie_writel(pcie, 0, PCIE_GLBL_INTERRUPT_ENABLE_0);
+	if (pp->irq > 0)
+		devm_free_irq(pci->dev, pp->irq, pcie);
 	taurus_pcie_perst_assert(pcie);
 	taurus_pcie_atu_clear(pcie);
 	reset_control_assert(pcie->core_reset);

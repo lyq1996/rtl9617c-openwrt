@@ -318,16 +318,19 @@ static int taurus_usb3_phy_probe(struct platform_device *pdev)
 
 	taurus_usb_phy->vbus = devm_gpiod_get_optional(dev, "usb-vbus",
 						      GPIOD_OUT_LOW);
-	if (IS_ERR(taurus_usb_phy->vbus))
+	if (IS_ERR(taurus_usb_phy->vbus)) {
+		if (PTR_ERR(taurus_usb_phy->vbus) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		dev_info(dev, "USB3-port VBUS GPIO get failed, ignored\n");
+		taurus_usb_phy->vbus = NULL;
+	}
 
-	taurus_usb_phy->bus_clk = devm_clk_get(dev, NULL);
+	taurus_usb_phy->bus_clk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(taurus_usb_phy->bus_clk)) {
+		if (PTR_ERR(taurus_usb_phy->bus_clk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		dev_info(dev, "get usb bus clk failed and just ignored\n");
-	} else {
-		ret = clk_prepare_enable(taurus_usb_phy->bus_clk);
-		if (ret)
-			return ret;
+		taurus_usb_phy->bus_clk = NULL;
 	}
 	driver_data = of_device_get_match_data(dev);
 	taurus_usb_phy->auto_cal = (int)driver_data->auto_cal;
@@ -369,7 +372,7 @@ static int taurus_usb3_phy_probe(struct platform_device *pdev)
 
 	addr_size = of_property_count_elems_of_size(node, addr, sizeof(u8));
 	data_size = of_property_count_elems_of_size(node, val, sizeof(u16));
-	if (addr_size != data_size) {
+	if (addr_size <= 0 || addr_size != data_size) {
 		dev_err(dev,
 			"phy address size doesn't match data size (%d != %d)\n",
 			addr_size, data_size);
@@ -427,11 +430,11 @@ static int taurus_usb3_phy_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, taurus_usb_phy);
+	taurus_usb3_host_reset(taurus_usb_phy);
+
 	ret = usb_add_phy_dev(&taurus_usb_phy->phy);
 	if (ret)
 		goto err;
-
-	taurus_usb3_host_reset(taurus_usb_phy);
 
 err:
 	return ret;

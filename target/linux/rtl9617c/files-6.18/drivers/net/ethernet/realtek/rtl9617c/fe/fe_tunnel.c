@@ -2159,7 +2159,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 						RTL_FE_DUAL_OWNER_DEBUGFS);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "%s -> %u", cmd, index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2173,8 +2175,10 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_content_free(fe, index);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "content-free %u ok",
 			 index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2184,8 +2188,10 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_control_free(fe, index);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "control-free %u ok",
 			 index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2195,7 +2201,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_fmr_free(fe, index);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "fmr-free %u ok", index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2207,9 +2215,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 			goto failed;
 		mutex_lock(&t->lock);
 		slot = t->content_slot[index];
-		mutex_unlock(&t->lock);
 		rtl_fe_dual_format_content(t->last, sizeof(t->last), index,
 					   &slot, words);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2221,9 +2229,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 			goto failed;
 		mutex_lock(&t->lock);
 		slot = t->control_slot[index];
-		mutex_unlock(&t->lock);
 		rtl_fe_dual_format_control(t->last, sizeof(t->last), index,
 					   &slot, words);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2235,9 +2243,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 			goto failed;
 		mutex_lock(&t->lock);
 		slot = t->fmr_slot[index];
-		mutex_unlock(&t->lock);
 		rtl_fe_dual_format_fmr(t->last, sizeof(t->last), index, &slot,
 				       words);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2251,8 +2259,10 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_content_write(fe, index, words);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "content-raw %u ok",
 			 index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2267,8 +2277,10 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_control_write(fe, index, words);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "control-raw %u ok",
 			 index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2282,8 +2294,10 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_control_set_type(fe, index, type);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "control-set %u %s ok",
 			 index, rtl_fe_dual_type_name(type));
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2308,7 +2322,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_dual_fmr_write(fe, index, words);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "fmr-set %u ok", index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2320,9 +2336,11 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_eif_alloc(fe, index, param, &phys);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last),
 			 "eif-alloc %u -> phys %u param %08x", index, phys,
 			 param);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2332,7 +2350,9 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_eif_free(fe, index);
 		if (ret)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last), "eif-free %u ok", index);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
@@ -2342,15 +2362,19 @@ static ssize_t rtl_fe_dual_debugfs_write(struct file *file,
 		ret = rtl_fe_eif_phys(index);
 		if (ret < 0)
 			goto failed;
+		mutex_lock(&t->lock);
 		snprintf(t->last, sizeof(t->last),
 			 "eif hash %u -> physical row %d", index, ret);
+		mutex_unlock(&t->lock);
 		return count;
 	}
 
 	return -EINVAL;
 
 failed:
+	mutex_lock(&t->lock);
 	snprintf(t->last, sizeof(t->last), "%s failed: %d", cmd, ret);
+	mutex_unlock(&t->lock);
 	return ret;
 }
 

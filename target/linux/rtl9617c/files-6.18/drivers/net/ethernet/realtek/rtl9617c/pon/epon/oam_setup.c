@@ -146,19 +146,24 @@ int rtl_pon_oam_init(struct rtl9617c_pon *pon)
 	}
 	ret = rtl_pon_oam_resize(pon, 1);
 	if (ret) {
-		unregister_netdev(dev);
 		rtl9617c_ni_pon_detach(pon->ni_dev);
-		goto free;
+		rcu_assign_pointer(pon->oam_devices[0], NULL);
+		synchronize_net();
+		unregister_netdev(dev);
+		rtl_oam_free(dev);
+		return ret;
 	}
 	{
 		struct netlink_kernel_cfg cfg = {
 			.input = rtl_oam_netlink_receive,
 		};
-		rtl_oam_netlink_pon = pon;
+		rcu_assign_pointer(rtl_oam_netlink_pon, pon);
 		pon->oam_netlink = netlink_kernel_create(&init_net,
 			NETLINK_USERSOCK, &cfg);
-		if (!pon->oam_netlink)
+		if (!pon->oam_netlink) {
+			RCU_INIT_POINTER(rtl_oam_netlink_pon, NULL);
 			dev_warn(pon->dev, "OAM netlink redirect unavailable\n");
+		}
 	}
 	dev_info(pon->dev, "%s: native per-LLID EPON OAM transport via NI CPU0/VP8\n", dev->name);
 	/*
@@ -182,12 +187,13 @@ free:
 
 void rtl_pon_oam_remove(struct rtl9617c_pon *pon)
 {
+	if (rcu_access_pointer(rtl_oam_netlink_pon) == pon)
+		RCU_INIT_POINTER(rtl_oam_netlink_pon, NULL);
 	if (pon->oam_netlink) {
 		netlink_kernel_release(pon->oam_netlink);
 		pon->oam_netlink = NULL;
 	}
-	if (rtl_oam_netlink_pon == pon)
-		rtl_oam_netlink_pon = NULL;
+	synchronize_rcu();
 	rtl9617c_ni_fe_detach(pon->ni_dev);
 	rtl9617c_ni_pon_detach(pon->ni_dev);
 	rtl_pon_itu_paths_remove(pon);

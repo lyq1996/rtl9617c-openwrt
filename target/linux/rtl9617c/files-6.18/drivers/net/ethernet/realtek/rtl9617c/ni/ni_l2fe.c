@@ -1586,7 +1586,6 @@ void rtl_ni_l2fe_unregister_ni(void)
 static int __init rtl_ni_l2fe_late_init(void)
 {
 	struct rtl9617c_ni *ni = NULL;
-	struct device *ptp_dev = NULL;
 	struct net_device *dev;
 
 	rtnl_lock();
@@ -1598,17 +1597,14 @@ static int __init rtl_ni_l2fe_late_init(void)
 					    NETIF_F_HW_VLAN_CTAG_FILTER;
 			dev->features |= NETIF_F_HW_TC |
 					 NETIF_F_HW_VLAN_CTAG_FILTER;
-			if (!ni) {
+			if (!ni)
 				ni = port->ni;
-				ptp_dev = dev->dev.parent;
-			}
 		}
 	}
 	rtnl_unlock();
 
 	if (ni) {
 		rtl_ni_fc_ext_init(ni);
-		rtl_ni_ptp_init_dev(ni, ptp_dev);
 		rtl_ni_l2fe_register_ni(ni);
 	}
 

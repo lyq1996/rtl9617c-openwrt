@@ -300,6 +300,7 @@ struct rtl9617c_ni {
 	u32 xge_bypass;
 	struct mutex mib_lock;
 	struct delayed_work mib_work;
+	struct work_struct tx_timeout_work;
 	u64 mib[RTL_NI_GE_PORTS][RTL9617C_NI_MIB_COUNTERS];
 	struct rtl_te_flow te;
 	atomic_long_t rx_errors;
@@ -352,6 +353,9 @@ void rtl_ni_dma_ring_reclaim(struct rtl_ni_dma *dma,
 			     struct rtl_ni_dma_ring *ring);
 bool rtl_ni_dma_ring_avail(const struct rtl_ni_dma_ring *ring,
 			   unsigned int needed);
+int rtl_ni_dma_prepare_skb(struct sk_buff *skb,
+			   const struct rtl9617c_ni_frame *frame,
+			   unsigned int mtu);
 int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 			 struct sk_buff *skb,
 			 const struct rtl9617c_ni_frame *frame,

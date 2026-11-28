@@ -450,12 +450,14 @@ static void __iomem *taurus_serdes_map(struct platform_device *pdev,
 				       const char *name)
 {
 	struct resource *res;
+	void __iomem *base;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
 	if (!res)
 		return IOMEM_ERR_PTR(-EINVAL);
 
-	return devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	return base ?: IOMEM_ERR_PTR(-ENOMEM);
 }
 
 static int taurus_serdes_probe(struct platform_device *pdev)

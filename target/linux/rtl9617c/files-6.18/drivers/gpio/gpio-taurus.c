@@ -117,10 +117,10 @@ static int taurus_gpio_request(struct gpio_chip *chip, unsigned int offset)
 
 	taurus_gpio_set_bit(bank, TAURUS_GPIO_CFG, offset);
 
-	if (!strcmp(bank->label, "taurus-gpio0"))
-		taurus_spare_reg_mode_set(offset, 0);
-
 	raw_spin_unlock_irqrestore(&bank->lock, flags);
+
+	if (!strcmp(bank->label, "taurus-gpio0") && offset < 16)
+		taurus_spare_reg_mode_set(offset, 0);
 
 	return 0;
 }
@@ -314,10 +314,9 @@ static int taurus_gpio_set_irq_wake(struct irq_data *data, unsigned int on)
 static void taurus_gpio_irq_handler(struct irq_desc *desc)
 {
 	irq_hw_number_t hw;
-	unsigned int irq_stat, irq_no;
+	unsigned int irq_stat;
 	struct taurus_gpio_bank *bank;
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	struct irq_desc *child_desc;
 
 	bank = (struct taurus_gpio_bank *)irq_desc_get_handler_data(desc);
 	irq_stat = taurus_gpio_read(bank, TAURUS_GPIO_INT) &
@@ -330,9 +329,7 @@ static void taurus_gpio_irq_handler(struct irq_desc *desc)
 		if (!(irq_stat & 1))
 			continue;
 
-		irq_no = irq_find_mapping(bank->domain, hw);
-		child_desc = irq_to_desc(irq_no);
-		generic_handle_irq_desc(child_desc);
+		generic_handle_domain_irq(bank->domain, hw);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -394,6 +391,11 @@ static int taurus_gpio_bank_probe(struct taurus_gpio_bank_info *info)
 
 	bank->domain = irq_domain_add_linear(np, bank->chip.ngpio,
 					     &irq_generic_chip_ops, bank);
+	if (!bank->domain) {
+		dev_info(dev, "IRQ domain alloc failed for bank %u, IRQs disabled\n",
+			 info->index);
+		return 0;
+	}
 
 	err = irq_alloc_domain_generic_chips(bank->domain, bank->chip.ngpio, 2,
 					     bank->label, handle_bad_irq, 0, 0,
@@ -402,6 +404,7 @@ static int taurus_gpio_bank_probe(struct taurus_gpio_bank_info *info)
 		dev_info(dev, "generic chip alloc failed for bank %u, IRQs disabled\n",
 			 info->index);
 		irq_domain_remove(bank->domain);
+		bank->domain = NULL;
 		return 0;
 	}
 

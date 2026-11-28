@@ -257,10 +257,14 @@ free_netdev:
 
 void rtl_pon_omci_remove(struct rtl9617c_pon *pon)
 {
+	struct net_device *dev = pon->omci_device;
+
 	rtl_pon_dying_gasp_stop(pon);
-	unregister_netdev(pon->omci_device);
-	free_netdev(pon->omci_device);
-	pon->omci_device = NULL;
+	WRITE_ONCE(pon->omci_device, NULL);
+	if (dev) {
+		unregister_netdev(dev);
+		free_netdev(dev);
+	}
 	crypto_free_shash(pon->omci_cmac);
 	crypto_free_shash(pon->omci_kdf);
 }

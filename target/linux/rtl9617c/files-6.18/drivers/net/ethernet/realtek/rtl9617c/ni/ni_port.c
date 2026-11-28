@@ -336,8 +336,12 @@ static int rtl_ni_open(struct net_device *dev)
 	netif_tx_start_all_queues(dev);
 	for (id = 0; id < min_t(unsigned int, dev->real_num_tx_queues,
 				ni->dma.num_rings); id++) {
-		if (READ_ONCE(ni->dma.rings[id].stopped))
+		unsigned long flags;
+
+		spin_lock_irqsave(&ni->dma.rings[id].lock, flags);
+		if (ni->dma.rings[id].stopped)
 			netif_tx_stop_queue(netdev_get_tx_queue(dev, id));
+		spin_unlock_irqrestore(&ni->dma.rings[id].lock, flags);
 	}
 	return 0;
 }
@@ -463,7 +467,7 @@ static void rtl_ni_tx_timeout(struct net_device *dev, unsigned int txqueue)
 	struct rtl9617c_ni_port *port = netdev_priv(dev);
 
 	netdev_err(dev, "transmit timeout\n");
-	rtl_ni_tx_restart(port->ni);
+	schedule_work(&port->ni->tx_timeout_work);
 }
 
 static int rtl_ni_setup_tc(struct net_device *dev, enum tc_setup_type type,
@@ -502,7 +506,6 @@ static int rtl_ni_port_open(struct net_device *dev)
 	ret = rtl_ni_open(dev);
 	if (!ret) {
 		rtl_ni_fc_ext_init(port->ni);
-		rtl_ni_ptp_init_dev(port->ni, dev->dev.parent);
 		rtl_ni_l2fe_register_ni(port->ni);
 	}
 
@@ -513,9 +516,20 @@ static netdev_tx_t rtl_ni_port_xmit(struct sk_buff *skb,
 				    struct net_device *dev)
 {
 	struct rtl9617c_ni_port *port = netdev_priv(dev);
+	struct sk_buff *ts_skb = NULL;
+	netdev_tx_t ret;
 
-	rtl_ni_ptp_tx_submit(port, skb);
-	return rtl_ni_start_xmit(skb, dev);
+	if (unlikely((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
+		     skb->len >= ETH_HLEN))
+		ts_skb = rtl_ni_ptp_tx_prepare(port, skb);
+	ret = rtl_ni_start_xmit(skb, dev);
+	if (unlikely(ts_skb)) {
+		if (ret == NETDEV_TX_OK)
+			rtl_ni_ptp_tx_commit(port, ts_skb);
+		else
+			dev_kfree_skb_any(ts_skb);
+	}
+	return ret;
 }
 
 static netdev_features_t rtl_ni_fix_features(struct net_device *dev,
@@ -666,9 +680,9 @@ static void rtl_ni_port_destroy(struct rtl9617c_ni_port *port)
 	if (port->registered)
 		unregister_netdev(port->dev);
 	rtl_fe_remove_port(ni->fe, port->dev);
+	WRITE_ONCE(ni->ports[port->id], NULL);
 	RCU_INIT_POINTER(ni->rx_dev[port->id], NULL);
 	synchronize_net();
-	ni->ports[port->id] = NULL;
 	if (port->serdes && ni->serdes_on) {
 		phy_power_off(port->serdes);
 		ni->serdes_on = false;
@@ -855,13 +869,8 @@ static int rtl_ni_port_create(struct rtl9617c_ni *ni, struct device_node *np)
 	if (ret)
 		goto err;
 
-	ni->ports[id] = port;
+	WRITE_ONCE(ni->ports[id], port);
 	rcu_assign_pointer(ni->rx_dev[id], dev);
-
-	ret = register_netdev(dev);
-	if (ret)
-		goto err;
-	port->registered = true;
 	return 0;
 
 err:
@@ -872,6 +881,7 @@ err:
 int rtl_ni_ports_register(struct rtl9617c_ni *ni)
 {
 	struct device_node *ports, *np;
+	unsigned int id;
 	int ret = 0;
 
 	ports = of_get_child_by_name(ni->dev->of_node, "ethernet-ports");
@@ -884,6 +894,7 @@ int rtl_ni_ports_register(struct rtl9617c_ni *ni)
 		ret = rtl_ni_port_create(ni, np);
 		if (ret == -EPROBE_DEFER) {
 			of_node_put(np);
+			of_node_put(ports);
 			rtl_ni_ports_unregister(ni);
 			return ret;
 		}
@@ -893,8 +904,22 @@ int rtl_ni_ports_register(struct rtl9617c_ni *ni)
 	}
 	of_node_put(ports);
 
-	if (ret)
-		rtl_ni_ports_unregister(ni);
+	for (id = 0; id < RTL_NI_PORTS; id++) {
+		struct rtl9617c_ni_port *port = ni->ports[id];
+
+		if (!port)
+			continue;
+		ret = register_netdev(port->dev);
+		if (ret) {
+			dev_err(ni->dev, "port %u register_netdev failed: %d\n",
+				id, ret);
+			rtl_ni_port_destroy(port);
+			ret = 0;
+			continue;
+		}
+		port->registered = true;
+	}
+
 	return ret;
 }
 

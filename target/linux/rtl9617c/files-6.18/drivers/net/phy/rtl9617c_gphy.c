@@ -192,11 +192,7 @@ static void rtl9617c_gphy_bus_write_paged(struct mii_bus *bus, u8 addr,
 {
 	mutex_lock(&bus->mdio_lock);
 	__mdiobus_write(bus, addr, RTL9617C_PAGE_SELECT, page);
-	mutex_unlock(&bus->mdio_lock);
-
 	usleep_range(1000, 1200);
-
-	mutex_lock(&bus->mdio_lock);
 	__mdiobus_write(bus, addr, reg, val);
 	mutex_unlock(&bus->mdio_lock);
 }
@@ -252,6 +248,7 @@ static void *rtl9617c_read_nvmem_pair(struct device_node *start,
 static int rtl9617c_load_efuse_once(struct phy_device *phydev)
 {
 	struct device_node *np = phydev->mdio.dev.of_node;
+	typeof(rtl9617c_gphy_efuse_data) tmp = {};
 	void *buf;
 	size_t len = 0;
 	unsigned int i;
@@ -262,18 +259,21 @@ static int rtl9617c_load_efuse_once(struct phy_device *phydev)
 	buf = rtl9617c_read_nvmem_pair(np, "param", "phy_param", &len);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
-	rtl9617c_gphy_efuse_loaded = true;
 
-	if (!buf)
+	if (!buf) {
+		rtl9617c_gphy_efuse_loaded = true;
 		return 0;
+	}
 	if (len >= 4) {
-		rtl9617c_gphy_efuse_data.param = get_unaligned_le32(buf);
-		rtl9617c_gphy_efuse_data.valid = true;
+		tmp.param = get_unaligned_le32(buf);
+		tmp.valid = true;
 	}
 	kfree(buf);
 
-	if (!rtl9617c_gphy_efuse_data.valid)
+	if (!tmp.valid) {
+		rtl9617c_gphy_efuse_loaded = true;
 		return 0;
+	}
 
 	buf = rtl9617c_read_nvmem_pair(np, "calibration", "calib", &len);
 	if (IS_ERR(buf))
@@ -283,35 +283,36 @@ static int rtl9617c_load_efuse_once(struct phy_device *phydev)
 			const u8 *p = buf;
 
 			for (i = 0; i < 4; i++, p += 8) {
-				rtl9617c_gphy_efuse_data.ports[i].rc_s =
-					get_unaligned_le16(p);
-				rtl9617c_gphy_efuse_data.ports[i].amp =
-					get_unaligned_le16(p + 2);
-				rtl9617c_gphy_efuse_data.ports[i].rc_l =
-					get_unaligned_le16(p + 4);
-				rtl9617c_gphy_efuse_data.ports[i].r =
-					get_unaligned_le16(p + 6);
+				tmp.ports[i].rc_s = get_unaligned_le16(p);
+				tmp.ports[i].amp = get_unaligned_le16(p + 2);
+				tmp.ports[i].rc_l = get_unaligned_le16(p + 4);
+				tmp.ports[i].r = get_unaligned_le16(p + 6);
 			}
 		} else {
-			rtl9617c_gphy_efuse_data.valid = false;
+			tmp.valid = false;
 		}
 		kfree(buf);
 	} else {
-		rtl9617c_gphy_efuse_data.valid = false;
+		tmp.valid = false;
 	}
 
-	if (!rtl9617c_gphy_efuse_data.valid)
+	if (!tmp.valid) {
+		rtl9617c_gphy_efuse_loaded = true;
 		return 0;
+	}
 
 	buf = rtl9617c_read_nvmem_pair(np, "phy_patch", "patch", &len);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 	if (buf) {
 		if (len >= 16)
-			rtl9617c_gphy_efuse_data.r_cal_msb =
+			tmp.r_cal_msb =
 				get_unaligned_le16((const u8 *)buf + 14);
 		kfree(buf);
 	}
+
+	rtl9617c_gphy_efuse_data = tmp;
+	rtl9617c_gphy_efuse_loaded = true;
 
 	phydev_info(phydev, "GPHY OTP calibration enabled (param=0x%08x)\n",
 		    rtl9617c_gphy_efuse_data.param);

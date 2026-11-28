@@ -122,11 +122,12 @@ ssize_t rtl_pon_ploam_transmit(struct rtl9617c_pon *pon, const char *buf, size_t
 			     bool default_key)
 {
 	const struct rtl_dq_io io = {pon, rtl_itu_read, rtl_itu_write, NULL};
+	u32 msg_type = count >= 2 ? (u8)buf[1] : 0;
 	u32 value;
 	ssize_t ret;
 
-	pon_event_at(pon, PON_EV_PLOAM_TX, 0, (u32)(u8)buf[1], (u32)count, 0);
-	pon_dbg("ploam tx: type=%u len=%u\n", (u32)(u8)buf[1], (u32)count);
+	pon_event_at(pon, PON_EV_PLOAM_TX, 0, msg_type, (u32)count, 0);
+	pon_dbg("ploam tx: type=%u len=%u\n", msg_type, (u32)count);
 	mutex_lock(&pon->control_lock);
 	mutex_lock(&pon->lock);
 	if (rtl_pon_mode_is_epon(pon->mode) || (pon->mode == RTL_PON_GPON && default_key)) {
@@ -158,7 +159,7 @@ ssize_t rtl_pon_ploam_transmit(struct rtl9617c_pon *pon, const char *buf, size_t
 	}
 	mutex_unlock(&pon->lock);
 	mutex_unlock(&pon->control_lock);
-	pon_event_at(pon, PON_EV_PLOAM_TX, 1, (u32)(u8)buf[1], (u32)count, (u32)ret);
+	pon_event_at(pon, PON_EV_PLOAM_TX, 1, msg_type, (u32)count, (u32)ret);
 	return ret;
 }
 

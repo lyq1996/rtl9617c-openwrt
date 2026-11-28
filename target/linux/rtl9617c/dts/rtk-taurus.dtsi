@@ -60,6 +60,13 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
+		/*
+		 * Keep OPP steps within the prediv=5 (5 MHz PFD, 1000..1200 MHz
+		 * VCO) CPLL envelope. 400/600/1200 MHz share CPLL=1200 MHz
+		 * (div_cortex 3/2/1, zero CPLL reset); 1000/1100/1150 MHz allow
+		 * stock-strap and silicon-margin testing without high-VCO
+		 * prediv=3 (1400..1800 MHz) PLL swings.
+		 */
 		opp-400000000 {
 			opp-hz = /bits/ 64 <400000000>;
 			clock-latency-ns = <20000000>;
@@ -68,28 +75,16 @@
 			opp-hz = /bits/ 64 <600000000>;
 			clock-latency-ns = <20000000>;
 		};
-		opp-625000000 {
-			opp-hz = /bits/ 64 <625000000>;
-			clock-latency-ns = <20000000>;
-		};
-		opp-700000000 {
-			opp-hz = /bits/ 64 <700000000>;
-			clock-latency-ns = <20000000>;
-		};
-		opp-800000000 {
-			opp-hz = /bits/ 64 <800000000>;
-			clock-latency-ns = <20000000>;
-		};
-		opp-900000000 {
-			opp-hz = /bits/ 64 <900000000>;
-			clock-latency-ns = <20000000>;
-		};
 		opp-1000000000 {
 			opp-hz = /bits/ 64 <1000000000>;
 			clock-latency-ns = <20000000>;
 		};
 		opp-1100000000 {
 			opp-hz = /bits/ 64 <1100000000>;
+			clock-latency-ns = <20000000>;
+		};
+		opp-1150000000 {
+			opp-hz = /bits/ 64 <1150000000>;
 			clock-latency-ns = <20000000>;
 		};
 		opp-1200000000 {

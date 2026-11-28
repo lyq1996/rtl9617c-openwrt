@@ -483,12 +483,16 @@ EXPORT_SYMBOL_GPL(rtl9617c_bosa_prepare);
 ssize_t rtl9617c_bosa_state(struct device *dev, char *buf)
 {
 	struct rtl_bosa *bosa = dev_get_drvdata(dev);
+	ssize_t ret;
 
-	return sysfs_emit(buf, "configured=%u model=%s eeprom=%u calibration=%s writes=%u error=%d identity=%02x/%02x/%02x\n",
+	mutex_lock(&bosa->lock);
+	ret = sysfs_emit(buf, "configured=%u model=%s eeprom=%u calibration=%s writes=%u error=%d identity=%02x/%02x/%02x\n",
 		bosa->configured, bosa->profile ? bosa->profile->name : "unknown",
 		bosa->eeprom, rtl_bosa_calibration_name(bosa->calibration),
 		bosa->writes, bosa->error, bosa->identity[0], bosa->identity[1],
 		bosa->identity[2]);
+	mutex_unlock(&bosa->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(rtl9617c_bosa_state);
 

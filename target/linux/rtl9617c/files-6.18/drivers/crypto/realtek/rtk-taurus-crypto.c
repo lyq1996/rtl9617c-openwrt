@@ -270,14 +270,18 @@ static int rtk_wait_done(struct rtk_crypto_dev *rdev)
 					    "crypto timeout stat=0x%08x err=0x%08x\n",
 					    readl(rdev->base + RTK_REG_CTRL_STAT),
 					    readl(rdev->base + RTK_REG_ERR_STAT));
+			disable_irq(rdev->irq);
 			rtk_hw_init(rdev);
+			enable_irq(rdev->irq);
 			return -ETIMEDOUT;
 		}
 		if (rdev->irq_err) {
 			dev_err_ratelimited(rdev->dev,
 					    "crypto irq err=0x%08x\n",
 					    rdev->irq_err);
+			disable_irq(rdev->irq);
 			rtk_hw_init(rdev);
+			enable_irq(rdev->irq);
 			return -EIO;
 		}
 		return 0;
@@ -526,17 +530,21 @@ static void rtk_crypto_work_handler(struct work_struct *work)
 
 	for (;;) {
 		struct crypto_async_request *areq, *backlog;
+		unsigned long flags;
 		int err;
 
-		spin_lock_bh(&rdev->q_lock);
+		spin_lock_irqsave(&rdev->q_lock, flags);
 		backlog = crypto_get_backlog(&rdev->queue);
 		areq = crypto_dequeue_request(&rdev->queue);
-		spin_unlock_bh(&rdev->q_lock);
+		spin_unlock_irqrestore(&rdev->q_lock, flags);
 
 		if (!areq)
 			break;
-		if (backlog)
+		if (backlog) {
+			local_bh_disable();
 			crypto_request_complete(backlog, -EINPROGRESS);
+			local_bh_enable();
+		}
 
 		if (crypto_tfm_alg_type(areq->tfm) == CRYPTO_ALG_TYPE_SKCIPHER) {
 			struct skcipher_request *sreq =
@@ -550,18 +558,21 @@ static void rtk_crypto_work_handler(struct work_struct *work)
 			err = rtk_process_aead(rdev, areq_aead);
 		}
 
+		local_bh_disable();
 		crypto_request_complete(areq, err);
+		local_bh_enable();
 	}
 }
 
 static int rtk_enqueue_req(struct rtk_crypto_dev *rdev,
 			   struct crypto_async_request *areq)
 {
+	unsigned long flags;
 	int err;
 
-	spin_lock_bh(&rdev->q_lock);
+	spin_lock_irqsave(&rdev->q_lock, flags);
 	err = crypto_enqueue_request(&rdev->queue, areq);
-	spin_unlock_bh(&rdev->q_lock);
+	spin_unlock_irqrestore(&rdev->q_lock, flags);
 
 	if (err == -ENOSPC)
 		return err;
@@ -862,7 +873,7 @@ static int rtk_crypto_probe(struct platform_device *pdev)
 		return ret;
 
 	rdev->dma_cpu = dmam_alloc_coherent(dev, RTK_DMA_BUF_SZ, &rdev->dma_bus,
-					    GFP_KERNEL | GFP_DMA32);
+					    GFP_KERNEL);
 	if (!rdev->dma_cpu)
 		return -ENOMEM;
 
@@ -883,18 +894,22 @@ static int rtk_crypto_probe(struct platform_device *pdev)
 	rdev->dst = rdev->dma_cpu + RTK_OFF_DST;
 	rdev->dst_dma = rdev->dma_bus + RTK_OFF_DST;
 
+	rdev->irq = 0;
+	rtk_hw_init(rdev);
+	rev = readl(rdev->base + RTK_REG_REV);
+	if (!rev || rev == 0xffffffffU)
+		return -ENODEV;
+
 	rdev->irq = platform_get_irq_optional(pdev, 0);
 	if (rdev->irq > 0) {
 		ret = devm_request_irq(dev, rdev->irq, rtk_crypto_isr, 0,
 				       dev_name(dev), rdev);
 		if (ret)
 			return ret;
+		if (use_irq)
+			writel(RTK_IRQ_UNMASK_ALL,
+			       rdev->base + RTK_REG_IRQ_CTRL);
 	}
-
-	rtk_hw_init(rdev);
-	rev = readl(rdev->base + RTK_REG_REV);
-	if (!rev || rev == 0xffffffffU)
-		return -ENODEV;
 
 	rdev->wq = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM,
 					   dev_name(dev));
@@ -925,6 +940,8 @@ err_sk:
 	crypto_unregister_skcipher(&rdev->skcipher.alg);
 err_wq:
 	writel(RTK_IRQ_MASK_ALL, rdev->base + RTK_REG_IRQ_CTRL);
+	if (rdev->irq > 0)
+		devm_free_irq(dev, rdev->irq, rdev);
 	destroy_workqueue(rdev->wq);
 	return ret;
 }
@@ -938,10 +955,13 @@ static void rtk_crypto_remove(struct platform_device *pdev)
 	crypto_unregister_aead(&rdev->aead[0].alg);
 	crypto_unregister_skcipher(&rdev->skcipher.alg);
 
-	cancel_work_sync(&rdev->work);
+	flush_work(&rdev->work);
 	destroy_workqueue(rdev->wq);
 
 	writel(RTK_IRQ_MASK_ALL, rdev->base + RTK_REG_IRQ_CTRL);
+	if (rdev->irq > 0)
+		devm_free_irq(rdev->dev, rdev->irq, rdev);
+
 	for (i = 0; i < 8; i++)
 		writel(0, rdev->base + RTK_REG_KEY_SLOT(0) + i * 4);
 

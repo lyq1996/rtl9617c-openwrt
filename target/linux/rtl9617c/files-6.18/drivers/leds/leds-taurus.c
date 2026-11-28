@@ -89,11 +89,14 @@ void taurus_led_set_all(int control)
 	int idx;
 	struct taurus_led_cfg *led_cfg;
 
+	if (!glb_led_ctrl)
+		return;
+
 	spin_lock_irqsave(glb_led_ctrl->lock, flags);
 	if (led_control == control)
 		goto out;
 
-	if ((led_control > 2) || (led_control < 0))
+	if ((control > 2) || (control < 0))
 		goto out;
 
 	led_control = control;
@@ -101,6 +104,8 @@ void taurus_led_set_all(int control)
 		unsigned long val;
 
 		led_cfg = glb_led_ctrl->led_cfg[idx];
+		if (!led_cfg)
+			continue;
 		val = led_cfg->data &
 		      ~(TAURUS_LED_OFF_ON_MASK << TAURUS_LED_OFF_ON_OFFSET) &
 		      ~(TAURUS_LED_EVENT_BLINK_MASK <<
@@ -154,10 +159,14 @@ int taurus_led_sw_on(int idx, int on)
 	unsigned long flags;
 	u32 val;
 
-	if (idx >= TAURUS_LED_MAX_COUNT)
+	if (!glb_led_ctrl)
+		return -ENODEV;
+	if (idx < 0 || idx >= TAURUS_LED_MAX_COUNT)
 		return -EINVAL;
 
 	led_cfg = glb_led_ctrl->led_cfg[idx];
+	if (!led_cfg)
+		return -ENODEV;
 
 	spin_lock_irqsave(led_cfg->lock, flags);
 	val = taurus_led_read(led_cfg->mem, led_cfg);
@@ -179,10 +188,14 @@ int taurus_led_enable(int idx, int enable)
 	unsigned long flags;
 	u32 val;
 
-	if (idx >= TAURUS_LED_MAX_COUNT)
+	if (!glb_led_ctrl)
+		return -ENODEV;
+	if (idx < 0 || idx >= TAURUS_LED_MAX_COUNT)
 		return -EINVAL;
 
 	led_cfg = glb_led_ctrl->led_cfg[idx];
+	if (!led_cfg)
+		return -ENODEV;
 
 	spin_lock_irqsave(led_cfg->lock, flags);
 
@@ -212,20 +225,24 @@ int taurus_led_config(int idx, int active_low, int off_event, int blink_event,
 	unsigned long flags;
 	u32 val;
 
-	if (idx >= TAURUS_LED_MAX_COUNT)
+	if (!glb_led_ctrl)
+		return -ENODEV;
+	if (idx < 0 || idx >= TAURUS_LED_MAX_COUNT)
 		return -EINVAL;
-	if (off_event > TAURUS_LED_TRIGGER_NONE)
+	if (off_event < 0 || off_event > TAURUS_LED_TRIGGER_NONE)
 		return -EINVAL;
-	if (blink_event > TAURUS_LED_TRIGGER_NONE)
+	if (blink_event < 0 || blink_event > TAURUS_LED_TRIGGER_NONE)
 		return -EINVAL;
-	if (on_event > TAURUS_LED_TRIGGER_NONE)
+	if (on_event < 0 || on_event > TAURUS_LED_TRIGGER_NONE)
 		return -EINVAL;
-	if (port >= TAURUS_LED_MAX_PORT)
+	if (port < 0 || port >= TAURUS_LED_MAX_PORT)
 		return -EINVAL;
-	if (blink > TAURUS_LED_BLINK_RATE2)
+	if (blink < 0 || blink > TAURUS_LED_BLINK_RATE2)
 		return -EINVAL;
 
 	led_cfg = glb_led_ctrl->led_cfg[idx];
+	if (!led_cfg)
+		return -ENODEV;
 
 	spin_lock_irqsave(led_cfg->lock, flags);
 
@@ -281,7 +298,20 @@ int taurus_led_test_mode(int enable)
 	u32 val;
 	int i;
 
+	if (!glb_led_ctrl)
+		return -ENODEV;
+
 	if (enable) {
+		for (i = 0; i < TAURUS_LED_MAX_COUNT; i++) {
+			led_cfg = glb_led_ctrl->led_cfg[i];
+			if (!led_cfg)
+				continue;
+			led_cdev = &led_cfg->cdev;
+			mutex_lock(&led_cdev->led_access);
+			led_sysfs_disable(led_cdev);
+			mutex_unlock(&led_cdev->led_access);
+		}
+
 		spin_lock_irqsave(glb_led_ctrl->lock, flags);
 
 		glb_led_ctrl->test_mode = 1;
@@ -291,9 +321,6 @@ int taurus_led_test_mode(int enable)
 				continue;
 
 			led_cfg = glb_led_ctrl->led_cfg[i];
-			led_cdev = &led_cfg->cdev;
-
-			led_sysfs_disable(led_cdev);
 			val = taurus_led_read(led_cfg->mem, led_cfg);
 			val &= ~(TAURUS_LED_EVENT_ON_MASK <<
 				 TAURUS_LED_EVENT_ON_OFFSET);
@@ -335,6 +362,12 @@ int taurus_led_test_mode(int enable)
 					  led_cfg->blink_event,
 					  led_cfg->on_event, led_cfg->port,
 					  led_cfg->blink);
+			if (led_cfg->on_event == TAURUS_LED_TRIGGER_SW) {
+				led_cdev = &led_cfg->cdev;
+				mutex_lock(&led_cdev->led_access);
+				led_sysfs_enable(led_cdev);
+				mutex_unlock(&led_cdev->led_access);
+			}
 		}
 	}
 
@@ -464,10 +497,12 @@ static ssize_t taurus_led_store_hw_event(struct device *dev,
 
 	spin_unlock_irqrestore(led_cfg->lock, flags);
 
+	mutex_lock(&led_cfg->cdev.led_access);
 	if (led_cfg->blink_event == TAURUS_LED_TRIGGER_SW)
 		led_sysfs_enable(&led_cfg->cdev);
 	else
 		led_sysfs_disable(&led_cfg->cdev);
+	mutex_unlock(&led_cfg->cdev.led_access);
 
 	return size;
 }
@@ -757,12 +792,14 @@ static int taurus_led_probe_one(struct taurus_led_ctrl *led_ctrl,
 
 	dev_set_drvdata(led_cfg->cdev.dev, led_cfg);
 
+	mutex_lock(&led_cfg->cdev.led_access);
 	if (led_cfg->on_event == TAURUS_LED_TRIGGER_SW) {
 		led_sysfs_enable(&led_cfg->cdev);
 	} else {
 		led_sysfs_disable(&led_cfg->cdev);
 		led_cfg->cdev.default_trigger = "none";
 	}
+	mutex_unlock(&led_cfg->cdev.led_access);
 
 	return 0;
 }
@@ -922,9 +959,13 @@ static ssize_t taurus_leds_blink_rate2_store(struct device *dev,
 	if (kstrtoul(buf, 10, &param))
 		return count;
 
-	param = param / 16 - 1;
-	if (param > TAURUS_LED_MAX_HW_BLINK)
-		param = TAURUS_LED_MAX_HW_BLINK;
+	if (param >= 16) {
+		param = param / 16 - 1;
+		if (param > TAURUS_LED_MAX_HW_BLINK)
+			param = TAURUS_LED_MAX_HW_BLINK;
+	} else {
+		param = 0;
+	}
 
 	spin_lock_irqsave(led_ctrl->lock, flags);
 	led_ctrl->blink_rate2 = param;
@@ -991,7 +1032,7 @@ static int taurus_leds_probe(struct platform_device *pdev)
 	}
 
 	if (!of_property_read_u32(np, "hw-blink-rate1", &val)) {
-		val = val / 16 - 1;
+		val = val >= 16 ? val / 16 - 1 : 0;
 		glb_led_ctrl->blink_rate1 = val > TAURUS_LED_MAX_HW_BLINK ?
 					    TAURUS_LED_MAX_HW_BLINK : val;
 	}
@@ -999,7 +1040,7 @@ static int taurus_leds_probe(struct platform_device *pdev)
 	       TAURUS_LED_BLINK_RATE1_OFFSET;
 
 	if (!of_property_read_u32(np, "hw-blink-rate2", &val)) {
-		val = val / 16 - 1;
+		val = val >= 16 ? val / 16 - 1 : 0;
 		glb_led_ctrl->blink_rate2 = val > TAURUS_LED_MAX_HW_BLINK ?
 					    TAURUS_LED_MAX_HW_BLINK : val;
 	}
@@ -1009,6 +1050,8 @@ static int taurus_leds_probe(struct platform_device *pdev)
 	spin_lock_irqsave(lock, flags);
 	taurus_led_write(glb_led_ctrl->mem, reg, NULL);
 	spin_unlock_irqrestore(lock, flags);
+
+	dev_set_drvdata(dev, glb_led_ctrl);
 
 	mem += 4;
 	for_each_available_child_of_node_scoped(np, child) {
@@ -1026,11 +1069,11 @@ static int taurus_leds_probe(struct platform_device *pdev)
 
 		rc = taurus_led_probe_one(glb_led_ctrl, child, reg,
 					  mem + reg * 4, lock);
-		if (rc < 0)
+		if (rc < 0) {
+			glb_led_ctrl = NULL;
 			return rc;
+		}
 	}
-
-	dev_set_drvdata(dev, glb_led_ctrl);
 
 	return devm_device_add_group(dev, &taurus_leds_attr_group);
 }
@@ -1046,6 +1089,7 @@ static struct platform_driver taurus_leds_driver = {
 	.driver = {
 		.name = "taurus-leds",
 		.of_match_table = taurus_leds_of_match,
+		.suppress_bind_attrs = true,
 	},
 };
 

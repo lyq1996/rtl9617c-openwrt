@@ -382,20 +382,25 @@ static int rtl9617c_pon_probe(struct platform_device *pdev)
 	dev_info(dev, "native PON MAC binding: global control=%08x\n", readl(pon->control));
 	ret = rtl_pon_oam_init(pon);
 	if (ret)
-		return ret;
+		goto err_mpcp;
 	ret = rtl_pon_omci_init(pon);
 	if (ret) {
 		rtl_pon_oam_remove(pon);
-		return ret;
+		goto err_mpcp;
 	}
 	ret = rtl_pon_dying_gasp_init(pon, pdev);
 	if (ret) {
-		rtl_pon_omci_remove(pon);
 		rtl_pon_oam_remove(pon);
-		return ret;
+		rtl_pon_omci_remove(pon);
+		goto err_mpcp;
 	}
 	pon_debug_init(pon);
 	return 0;
+err_mpcp:
+	writel(0, pon->top_irq + 4);
+	writel(0, pon->optical_irq + 4);
+	synchronize_irq(pon->mpcp_irq);
+	return ret;
 }
 
 static void rtl9617c_pon_shutdown(struct platform_device *pdev)

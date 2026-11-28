@@ -130,11 +130,13 @@ static int taurus_set_mux(struct pinctrl_dev *pctldev, unsigned selector,
 			  unsigned group)
 {
 	struct taurus_pinmap *pmap = pinctrl_dev_get_drvdata(pctldev);
+	unsigned long flags;
 	int bit_off, reg_off;
 	u32 reg;
 
 	taurus_pin_sel(pmap, group, &reg_off, &bit_off);
 
+	spin_lock_irqsave(&pmap->lock, flags);
 	reg = readl_relaxed(pmap->regs + reg_off);
 
 	if (taurus_is_pinmux(reg_off))
@@ -143,6 +145,7 @@ static int taurus_set_mux(struct pinctrl_dev *pctldev, unsigned selector,
 		reg &= ~BIT(bit_off);
 
 	writel_relaxed(reg, pmap->regs + reg_off);
+	spin_unlock_irqrestore(&pmap->lock, flags);
 
 	return 0;
 }
@@ -152,18 +155,20 @@ static int taurus_pmx_request_gpio(struct pinctrl_dev *pcdev,
 				   unsigned offset)
 {
 	struct taurus_pinmap *pmap = pinctrl_dev_get_drvdata(pcdev);
+	unsigned long flags;
 	int bit_off, reg_off;
 	u32 reg;
 
 	taurus_pin_sel(pmap, offset, &reg_off, &bit_off);
 
-	reg = readl_relaxed(pmap->regs + reg_off);
-
 	if (taurus_is_pinmux(reg_off))
 		return -EBUSY;
 
+	spin_lock_irqsave(&pmap->lock, flags);
+	reg = readl_relaxed(pmap->regs + reg_off);
 	reg |= BIT(bit_off);
 	writel_relaxed(reg, pmap->regs + reg_off);
+	spin_unlock_irqrestore(&pmap->lock, flags);
 
 	return 0;
 }
@@ -189,6 +194,8 @@ static int taurus_pinctrl_probe(struct platform_device *pdev)
 	pmap = devm_kzalloc(&pdev->dev, sizeof(*pmap), GFP_KERNEL);
 	if (!pmap)
 		return -ENOMEM;
+
+	spin_lock_init(&pmap->lock);
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	pmap->regs = devm_ioremap_resource(&pdev->dev, r);

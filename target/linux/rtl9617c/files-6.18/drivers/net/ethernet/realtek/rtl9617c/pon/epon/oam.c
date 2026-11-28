@@ -26,7 +26,7 @@ struct rtl_oam_nl_frame {
 	u8 data[];
 } __packed;
 
-struct rtl9617c_pon *rtl_oam_netlink_pon;
+struct rtl9617c_pon __rcu *rtl_oam_netlink_pon;
 
 static ssize_t llid_index_show(struct device *device, struct device_attribute *attribute, char *buf)
 {
@@ -157,27 +157,39 @@ netdev_tx_t rtl_oam_transmit(struct sk_buff *skb, struct net_device *dev)
 
 void rtl_oam_netlink_receive(struct sk_buff *skb)
 {
-	struct rtl9617c_pon *pon = rtl_oam_netlink_pon;
-	struct nlmsghdr *nlh = nlmsg_hdr(skb);
+	struct rtl9617c_pon *pon;
+	struct nlmsghdr *nlh;
 	struct rtl_oam_nl_frame *msg;
-	struct net_device *dev;
+	struct net_device *dev = NULL;
 	struct sk_buff *tx;
 	unsigned int llid;
 
-	if (!pon || nlh->nlmsg_len < NLMSG_HDRLEN + sizeof(*msg))
+	if (skb->len < NLMSG_HDRLEN || !pskb_may_pull(skb, NLMSG_HDRLEN))
+		return;
+	nlh = nlmsg_hdr(skb);
+	if (!nlmsg_ok(nlh, skb->len) ||
+	    nlh->nlmsg_len < NLMSG_HDRLEN + sizeof(*msg) ||
+	    !pskb_may_pull(skb, nlh->nlmsg_len))
 		return;
 	msg = nlmsg_data(nlh);
 	if (msg->type != 2 || msg->length > 1522 ||
-	    nlh->nlmsg_len < NLMSG_HDRLEN + sizeof(*msg) + msg->length)
+	    nlh->nlmsg_len - NLMSG_HDRLEN - sizeof(*msg) < msg->length)
 		return;
 	llid = msg->llid & 31;
 	rcu_read_lock();
-	dev = rcu_dereference(pon->oam_devices[llid]);
-	if (dev)
-		dev_hold(dev);
+	pon = rcu_dereference(rtl_oam_netlink_pon);
+	if (pon) {
+		dev = rcu_dereference(pon->oam_devices[llid]);
+		if (dev)
+			dev_hold(dev);
+	}
 	rcu_read_unlock();
 	if (!dev)
 		return;
+	if (!netif_running(dev)) {
+		dev_put(dev);
+		return;
+	}
 	tx = alloc_skb(msg->length, GFP_ATOMIC);
 	if (!tx) {
 		dev_put(dev);
@@ -186,7 +198,7 @@ void rtl_oam_netlink_receive(struct sk_buff *skb)
 	skb_put_data(tx, msg->data, msg->length);
 	tx->dev = dev;
 	tx->protocol = htons(ETH_P_8021Q);
-	rtl_oam_transmit(tx, dev);
+	dev_queue_xmit(tx);
 	dev_put(dev);
 }
 

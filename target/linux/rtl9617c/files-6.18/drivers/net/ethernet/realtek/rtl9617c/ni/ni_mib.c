@@ -219,10 +219,10 @@ static int rtl_ni_mib_p6_update_locked(struct rtl9617c_ni *ni)
 
 	lockdep_assert_held(&ni->mib_lock);
 
-	rtl_ni_rmw(ni, RTL_NI_XGE_MAC_CFG_COM,
-		   RTL_NI_XGE_MAC_CFG_COM_CLR_ON_RD |
-		   RTL_NI_XGE_MAC_CFG_COM_RT_MIB_EN,
-		   RTL_NI_XGE_MAC_CFG_COM_RT_MIB_EN);
+	regmap_update_bits(ni->regs, RTL_NI_XGE_MAC_CFG_COM,
+			   RTL_NI_XGE_MAC_CFG_COM_CLR_ON_RD |
+			   RTL_NI_XGE_MAC_CFG_COM_RT_MIB_EN,
+			   RTL_NI_XGE_MAC_CFG_COM_RT_MIB_EN);
 
 	for (id = 0; id < RTL_NI_XGE_MIB_COUNTERS; id++) {
 		u64 raw, delta;
@@ -266,7 +266,7 @@ static int rtl_ni_mib_p6_update_locked(struct rtl9617c_ni *ni)
 
 void rtl_ni_mib_p6_tick(struct rtl9617c_ni *ni)
 {
-	if (!ni)
+	if (!ni || !READ_ONCE(ni->ports[RTL_NI_PORT_P6]))
 		return;
 
 	rtl_ni_mib_p6_update_locked(ni);

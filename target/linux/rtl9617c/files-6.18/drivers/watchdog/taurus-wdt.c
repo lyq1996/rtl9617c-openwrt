@@ -25,6 +25,8 @@ struct taurus_wdt {
 	void __iomem		*regs;
 	void __iomem		*rst_reg;
 	struct clk		*clk;
+	unsigned long		clk_rate;
+	int			irq;
 	u32			prescaler;
 	u16			ps_div;
 	u32			delay_reset;
@@ -84,15 +86,16 @@ static inline void taurus_wdt_writereg(struct taurus_wdt *wdt, u32 offset,
 static int taurus_wdt_stop(struct watchdog_device *wdd)
 {
 	struct taurus_wdt *wdt = watchdog_get_drvdata(wdd);
+	unsigned long flags;
 	u32 val;
 
-	spin_lock(&wdt->io_lock);
+	spin_lock_irqsave(&wdt->io_lock, flags);
 
 	val = taurus_wdt_readreg(wdt, TAURUS_WDT_CTRL);
 	val &= ~TAURUS_WDT_CTRL_WDTEN;
 	taurus_wdt_writereg(wdt, TAURUS_WDT_CTRL, val);
 
-	spin_unlock(&wdt->io_lock);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
 
 	return 0;
 }
@@ -100,13 +103,14 @@ static int taurus_wdt_stop(struct watchdog_device *wdd)
 static int taurus_wdt_reload(struct watchdog_device *wdd)
 {
 	struct taurus_wdt *wdt = watchdog_get_drvdata(wdd);
+	unsigned long flags;
 
-	spin_lock(&wdt->io_lock);
+	spin_lock_irqsave(&wdt->io_lock, flags);
 
 	taurus_wdt_writereg(wdt, TAURUS_WDT_LOADE,
 			    TAURUS_WDT_LOADE_WDT | TAURUS_WDT_LOADE_PRE);
 
-	spin_unlock(&wdt->io_lock);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
 
 	return 0;
 }
@@ -114,13 +118,15 @@ static int taurus_wdt_reload(struct watchdog_device *wdd)
 static int taurus_wdt_start(struct watchdog_device *wdd)
 {
 	struct taurus_wdt *wdt = watchdog_get_drvdata(wdd);
+	unsigned long flags;
 	unsigned int data = 0;
 	unsigned short count;
 	unsigned int clock_rate, delay_cycle;
 
 	count = high_resolution ? wdd->timeout * 1000 : wdd->timeout;
+	clock_rate = wdt->clk_rate;
 
-	spin_lock(&wdt->io_lock);
+	spin_lock_irqsave(&wdt->io_lock, flags);
 
 	taurus_wdt_writereg(wdt, TAURUS_WDT_PS, wdt->prescaler);
 	taurus_wdt_writereg(wdt, TAURUS_WDT_DIV, wdt->ps_div);
@@ -137,7 +143,6 @@ static int taurus_wdt_start(struct watchdog_device *wdd)
 	if (wdt->delay_reset) {
 		unsigned int delay_ext2 = 0, tmp;
 
-		clock_rate = clk_get_rate(wdt->clk);
 		if (wdt->delay_type == 1) {
 			delay_cycle = wdt->delay_reset * (clock_rate / 1000);
 			data |= (delay_cycle & TAURUS_WDT_CTRL_MAX_DELAY) <<
@@ -167,7 +172,7 @@ static int taurus_wdt_start(struct watchdog_device *wdd)
 
 	taurus_wdt_writereg(wdt, TAURUS_WDT_CTRL, data);
 
-	spin_unlock(&wdt->io_lock);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
 
 	return 0;
 }
@@ -182,13 +187,14 @@ static int taurus_wdt_settimeout(struct watchdog_device *wdd, unsigned int new_t
 static unsigned int taurus_wdt_gettimeleft(struct watchdog_device *wdd)
 {
 	struct taurus_wdt *wdt = watchdog_get_drvdata(wdd);
+	unsigned long flags;
 	u32 val;
 
-	spin_lock(&wdt->io_lock);
+	spin_lock_irqsave(&wdt->io_lock, flags);
 
 	val = taurus_wdt_readreg(wdt, TAURUS_WDT_CNT);
 
-	spin_unlock(&wdt->io_lock);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
 
 	return high_resolution ? val / 1000 : val;
 }
@@ -197,13 +203,14 @@ static irqreturn_t taurus_wdt_irq_handler(int irq, void *dev_id)
 {
 	struct platform_device *pdev = dev_id;
 	struct taurus_wdt *wdt = platform_get_drvdata(pdev);
+	unsigned long flags;
 
-	spin_lock(&wdt->io_lock);
+	spin_lock_irqsave(&wdt->io_lock, flags);
 
 	taurus_wdt_writereg(wdt, TAURUS_WDT_INT_0, TAURUS_WDT_INT_WDTI);
 	taurus_wdt_writereg(wdt, TAURUS_WDT_IE_0, 0);
 
-	spin_unlock(&wdt->io_lock);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
 
 	dev_info(&pdev->dev, "watchdog timed out, internal reset not enabled\n");
 
@@ -248,9 +255,11 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 		wdt_device->max_timeout = U32_MAX;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -EINVAL;
 	wdt->regs = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-	if (IS_ERR(wdt->regs))
-		return PTR_ERR(wdt->regs);
+	if (!wdt->regs)
+		return -ENOMEM;
 
 	ret = of_property_read_u32(pdev->dev.of_node, "delay-reset",
 				   &wdt->delay_reset);
@@ -263,26 +272,17 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 		wdt->delay_type = 0;
 
 	wdt->rst = of_property_read_bool(pdev->dev.of_node, "reset-on-timeout");
-	irq = platform_get_irq(pdev, 0);
-	if (irq >= 0) {
-		ret = devm_request_irq(&pdev->dev, irq, taurus_wdt_irq_handler,
-				       0, pdev->name, pdev);
-		if (ret) {
-			dev_err(&pdev->dev,
-				"cannot register interrupt handler err=%d\n",
-				ret);
-			return ret;
-		}
-	}
 
 	if (wdt->rst) {
 		u32 val;
 
 		res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		if (!res)
+			return -EINVAL;
 		wdt->rst_reg = devm_ioremap(&pdev->dev, res->start,
 					    resource_size(res));
-		if (IS_ERR(wdt->rst_reg))
-			return PTR_ERR(wdt->rst_reg);
+		if (!wdt->rst_reg)
+			return -ENOMEM;
 
 		val = readl(wdt->rst_reg);
 		val |= TAURUS_WD_RESET_SUBSYS_ENABLE | TAURUS_WD_RESET_ALL_BLOCKS |
@@ -296,8 +296,8 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 		void __iomem *tmp_reg;
 
 		tmp_reg = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-		if (IS_ERR(tmp_reg))
-			return PTR_ERR(tmp_reg);
+		if (!tmp_reg)
+			return -ENOMEM;
 
 		writel_relaxed(0x1, tmp_reg);
 		devm_iounmap(&pdev->dev, tmp_reg);
@@ -312,15 +312,12 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 	watchdog_set_nowayout(wdt_device, nowayout);
 	watchdog_set_drvdata(wdt_device, wdt);
 
-	wdt->clk = devm_clk_get(&pdev->dev, NULL);
+	wdt->clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(wdt->clk))
 		return PTR_ERR(wdt->clk);
 
-	ret = clk_prepare_enable(wdt->clk);
-	if (ret)
-		return ret;
-
 	clock_f = clk_get_rate(wdt->clk);
+	wdt->clk_rate = clock_f;
 	wdt->prescaler = clock_f / 1000 - 1;
 	if (high_resolution) {
 		wdt->ps_div = 0;
@@ -331,12 +328,24 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&wdt->io_lock);
+	platform_set_drvdata(pdev, wdt);
+
+	irq = platform_get_irq_optional(pdev, 0);
+	wdt->irq = irq;
+	if (irq >= 0) {
+		ret = devm_request_irq(&pdev->dev, irq, taurus_wdt_irq_handler,
+				       0, pdev->name, pdev);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"cannot register interrupt handler err=%d\n",
+				ret);
+			return ret;
+		}
+	}
 
 	ret = watchdog_register_device(wdt_device);
 	if (ret)
 		return ret;
-
-	platform_set_drvdata(pdev, wdt);
 
 	return 0;
 }
@@ -344,10 +353,15 @@ static int taurus_wdt_probe(struct platform_device *pdev)
 static void taurus_wdt_remove(struct platform_device *pdev)
 {
 	struct taurus_wdt *wdt = platform_get_drvdata(pdev);
+	unsigned long flags;
 
 	taurus_wdt_stop(&wdt->wdt_device);
+	spin_lock_irqsave(&wdt->io_lock, flags);
+	taurus_wdt_writereg(wdt, TAURUS_WDT_IE_0, 0);
+	spin_unlock_irqrestore(&wdt->io_lock, flags);
+	if (wdt->irq >= 0)
+		devm_free_irq(&pdev->dev, wdt->irq, pdev);
 	watchdog_unregister_device(&wdt->wdt_device);
-	clk_disable_unprepare(wdt->clk);
 }
 
 static int __maybe_unused taurus_wdt_suspend(struct device *dev)

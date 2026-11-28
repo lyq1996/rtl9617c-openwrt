@@ -15,6 +15,7 @@
 #include <linux/unaligned.h>
 
 #include "ni.h"
+#include "ni_ext.h"
 #include "fe/fe.h"
 
 #define L2TM_QM_EQ_INIT			(RTL_L2TM_QM_EQ1_EN | \
@@ -68,9 +69,12 @@ static bool rtl_ni_is_port_dev(const struct rtl9617c_ni *ni,
 {
 	unsigned int id;
 
-	for (id = 0; id < RTL_NI_PORTS; id++)
-		if (ni->ports[id] && ni->ports[id]->dev == dev)
+	for (id = 0; id < RTL_NI_PORTS; id++) {
+		const struct rtl9617c_ni_port *port = READ_ONCE(ni->ports[id]);
+
+		if (port && port->dev == dev)
 			return true;
+	}
 	return false;
 }
 
@@ -83,7 +87,7 @@ static void rtl_ni_wake_ring(struct rtl9617c_ni *ni, struct rtl_ni_dma_ring *rin
 
 	ring->stopped = false;
 	for (id = 0; id < RTL_NI_PORTS; id++) {
-		struct rtl9617c_ni_port *port = ni->ports[id];
+		struct rtl9617c_ni_port *port = READ_ONCE(ni->ports[id]);
 
 		if (port && netif_running(port->dev) &&
 		    q < port->dev->num_tx_queues)
@@ -108,7 +112,7 @@ static void rtl_ni_stop_ring(struct rtl9617c_ni *ni, struct rtl_ni_dma_ring *rin
 
 	ring->stopped = true;
 	for (id = 0; id < RTL_NI_PORTS; id++) {
-		struct rtl9617c_ni_port *port = ni->ports[id];
+		struct rtl9617c_ni_port *port = READ_ONCE(ni->ports[id]);
 
 		if (port && netif_running(port->dev) &&
 		    q < port->dev->num_tx_queues)
@@ -241,6 +245,14 @@ netdev_tx_t rtl_ni_xmit_frame(struct rtl9617c_ni *ni, struct net_device *dev,
 	else
 		q = raw_smp_processor_id() % num_rings;
 
+	ret = rtl_ni_dma_prepare_skb(skb, frame, dev ? dev->mtu : ETH_DATA_LEN);
+	if (unlikely(ret)) {
+		if (dev)
+			DEV_STATS_INC(dev, tx_dropped);
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
+
 	ring = &ni->dma.rings[q];
 	spin_lock_irqsave(&ring->lock, flags);
 	ret = rtl_ni_dma_ring_xmit(&ni->dma, ring, skb, frame,
@@ -288,19 +300,37 @@ void rtl_ni_tx_restart(struct rtl9617c_ni *ni)
 {
 	unsigned long flags;
 	unsigned int q;
-	int ret;
+	bool restarted = false;
+	int ret = 0;
 
+	mutex_lock(&ni->lock);
+	if (!ni->users || READ_ONCE(ni->tx_closing)) {
+		mutex_unlock(&ni->lock);
+		return;
+	}
 	rtl_ni_tx_rings_lock(ni, &flags);
 	rtl_ni_dma_stop(&ni->dma);
 	ret = rtl_ni_dma_start(&ni->dma);
-	if (!ret)
+	if (!ret) {
 		for (q = 0; q < ni->dma.num_rings; q++)
 			rtl_ni_wake_ring(ni, &ni->dma.rings[q]);
+		restarted = true;
+	}
 	rtl_ni_tx_rings_unlock(ni, flags);
+	mutex_unlock(&ni->lock);
+
 	if (ret)
 		dev_err(ni->dev, "TX DMA restart failed: %d\n", ret);
-	else
+	else if (restarted)
 		rtl_ni_notify_dma_reset();
+}
+
+static void rtl_ni_tx_timeout_work_fn(struct work_struct *work)
+{
+	struct rtl9617c_ni *ni = container_of(work, struct rtl9617c_ni,
+					      tx_timeout_work);
+
+	rtl_ni_tx_restart(ni);
 }
 
 static int rtl_ni_poll(struct napi_struct *napi, int budget)
@@ -724,6 +754,7 @@ static int rtl_ni_probe(struct platform_device *pdev)
 	}
 	hrtimer_setup(&ni->timer, rtl_ni_timer, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL_SOFT);
+	INIT_WORK(&ni->tx_timeout_work, rtl_ni_tx_timeout_work_fn);
 
 	rtl_ni_write(ni, RTL_QM_EPP64_P3_0_INT_EN, 0);
 	rtl_ni_write(ni, RTL_QM_EPP64_P7_4_INT_EN, 0);
@@ -749,28 +780,35 @@ static int rtl_ni_probe(struct platform_device *pdev)
 		}
 	}
 
+	ret = rtl_te_flow_init(ni);
+	if (ret)
+		dev_warn(dev, "rtl_te_flow_init failed: %d\n", ret);
+
 	ni->fe = rtl_fe_create(dev, ni->regs, ni->fe_axi,
 			       ni->qm.lan_dq_bufs > 0, &ni->te);
 	if (IS_ERR(ni->fe)) {
 		dev_err(dev, "rtl_fe_create failed: %ld\n", PTR_ERR(ni->fe));
+		rtl_te_flow_exit(ni);
 		return PTR_ERR(ni->fe);
 	}
+	if (ni->fe)
+		rtl_te_flow_set_sync(&ni->te, rtl_ni_hostpol_sync, ni->fe);
+
+	rtl_ni_ptp_init_dev(ni, dev);
 
 	platform_set_drvdata(pdev, ni);
 	ret = rtl_ni_ports_register(ni);
 	if (ret) {
 		dev_err(dev, "rtl_ni_ports_register failed: %d\n", ret);
+		rtl_ni_ptp_cleanup();
+		rtl_te_flow_debugfs_exit(&ni->te);
+		rtl_te_flow_set_sync(&ni->te, NULL, NULL);
 		rtl_fe_destroy(ni->fe);
+		rtl_te_flow_exit(ni);
 		return ret;
 	}
 
 	rtl_ni_mib_init(ni);
-
-	ret = rtl_te_flow_init(ni);
-	if (ret)
-		dev_warn(dev, "rtl_te_flow_init failed: %d\n", ret);
-	else if (ni->fe)
-		rtl_te_flow_set_sync(&ni->te, rtl_ni_hostpol_sync, ni->fe);
 
 	dev_info(dev, "rtl_ni_probe succeeded (rxq=%u, txq=%u)\n",
 		 ni->qm.num_rxq, ni->dma.num_rings);
@@ -786,6 +824,7 @@ static void rtl_ni_shutdown(struct platform_device *pdev)
 		return;
 
 	rtl_ni_mib_exit(ni);
+	cancel_work_sync(&ni->tx_timeout_work);
 
 	rtnl_lock();
 	for (id = 0; id < RTL_NI_PORTS; id++) {
@@ -809,8 +848,12 @@ static void rtl_ni_remove(struct platform_device *pdev)
 	struct rtl9617c_ni *ni = platform_get_drvdata(pdev);
 
 	rtl_ni_mib_exit(ni);
-	rtl_te_flow_set_sync(&ni->te, NULL, NULL);
 	rtl_ni_ports_unregister(ni);
+	rtl_ni_ptp_cleanup();
+	rtl_ni_l2fe_unregister_ni();
+	cancel_work_sync(&ni->tx_timeout_work);
+	rtl_te_flow_debugfs_exit(&ni->te);
+	rtl_te_flow_set_sync(&ni->te, NULL, NULL);
 	rtl_fe_destroy(ni->fe);
 	WRITE_ONCE(ni->tx_closing, true);
 	hrtimer_cancel(&ni->timer);

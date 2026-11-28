@@ -125,10 +125,12 @@ static int taurus_lane_serdes_config(struct taurus_lane *lane, bool enable)
 
 	if (lane->cfg_cnt > 0 && lane->cfg) {
 		for (i = 0; i < lane->cfg_cnt; i++) {
+			if (lane->cfg[i].addr < lane->serdes_addr)
+				continue;
 			off = (phys_addr_t)lane->cfg[i].addr - lane->serdes_addr;
 			val = lane->cfg[i].val;
 
-			if (off >= 0 && off < lane->serdes_size)
+			if (off + sizeof(u32) <= lane->serdes_size)
 				writel(val, lane->serdes_base + off);
 		}
 		return 0;
@@ -350,6 +352,10 @@ static void taurus_lane_serdes_probe(struct device *dev, struct device_node *np,
 	p->cfg_cnt = of_property_count_elems_of_size(np, "serdes-cfg", size);
 	if (p->cfg_cnt > 0) {
 		p->cfg = devm_kmalloc_array(dev, p->cfg_cnt, size, GFP_KERNEL);
+		if (!p->cfg) {
+			p->cfg_cnt = 0;
+			return;
+		}
 
 		cnt = p->cfg_cnt * sizeof(struct taurus_lane_cfg) / sizeof(u32);
 		of_property_read_u32_array(np, "serdes-cfg", (u32 *)p->cfg,
@@ -380,14 +386,18 @@ static int taurus_lane_probe(struct platform_device *pdev)
 	core->dev = dev;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "control");
+	if (!res)
+		return -EINVAL;
 	core->reg_ctrl = devm_ioremap(dev, res->start, resource_size(res));
-	if (IS_ERR(core->reg_ctrl))
-		return PTR_ERR(core->reg_ctrl);
+	if (!core->reg_ctrl)
+		return -ENOMEM;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "power");
+	if (!res)
+		return -EINVAL;
 	core->reg_pwr = devm_ioremap(dev, res->start, resource_size(res));
-	if (IS_ERR(core->reg_pwr))
-		return PTR_ERR(core->reg_pwr);
+	if (!core->reg_pwr)
+		return -ENOMEM;
 
 	mutex_init(&core->lock);
 

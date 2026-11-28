@@ -47,7 +47,9 @@ static struct {
 	unsigned int count;
 	u64 seq;
 	struct pon_event ring[PON_EVENT_COUNT];
-} pon_events;
+} pon_events = {
+	.lock = __SPIN_LOCK_UNLOCKED(pon_events.lock),
+};
 
 static const char *pon_event_name(unsigned int code)
 {

@@ -54,6 +54,7 @@ struct taurus_trng_ctrl {
 	struct device *dev;
 	void __iomem *reg;
 	int irq;
+	raw_spinlock_t lock;
 	union taurus_rng_ctrl_bits ctrl_reg_v;
 	unsigned int is_self_test_en:1;
 	unsigned int is_lfsr_bypass:1;
@@ -109,10 +110,13 @@ static struct hwrng taurus_trng_hwrng = {
 
 static void taurus_trng_reset_assert(struct taurus_trng_ctrl *t, int mode)
 {
+	unsigned long flags;
+
 	if (!mode)
 		return;
 
 	atomic_inc(&t->in_reset);
+	raw_spin_lock_irqsave(&t->lock, flags);
 	t->ctrl_reg_v.wrd = readl(t->reg + TAURUS_RNG_CTRL);
 
 	if (mode & TAURUS_RNG_SRST)
@@ -122,13 +126,17 @@ static void taurus_trng_reset_assert(struct taurus_trng_ctrl *t, int mode)
 		t->ctrl_reg_v.rng_cali_srst = 0x1;
 
 	writel(t->ctrl_reg_v.wrd, t->reg + TAURUS_RNG_CTRL);
+	raw_spin_unlock_irqrestore(&t->lock, flags);
 }
 
 static void taurus_trng_reset_deassert(struct taurus_trng_ctrl *t, int mode)
 {
+	unsigned long flags;
+
 	if (!mode)
 		return;
 
+	raw_spin_lock_irqsave(&t->lock, flags);
 	t->ctrl_reg_v.wrd = readl(t->reg + TAURUS_RNG_CTRL);
 
 	if (mode & TAURUS_RNG_SRST)
@@ -138,6 +146,7 @@ static void taurus_trng_reset_deassert(struct taurus_trng_ctrl *t, int mode)
 		t->ctrl_reg_v.rng_cali_srst = 0x0;
 
 	writel(t->ctrl_reg_v.wrd, t->reg + TAURUS_RNG_CTRL);
+	raw_spin_unlock_irqrestore(&t->lock, flags);
 	atomic_dec(&t->in_reset);
 }
 
@@ -151,8 +160,8 @@ static irqreturn_t taurus_trng_irq_handler(int irq, void *arg)
 		taurus_trng_reset_assert(t, TAURUS_RNG_SRST);
 		taurus_trng_reset_deassert(t, TAURUS_RNG_SRST);
 	} else if (val & TAURUS_INT_ST_ERR) {
-		dev_info(t->dev, "self test error found (0x%x)\n",
-			 readl(t->reg + TAURUS_RNG_ST_RETURN) & 0xf);
+		dev_info_ratelimited(t->dev, "self test error found (0x%x)\n",
+				     readl(t->reg + TAURUS_RNG_ST_RETURN) & 0xf);
 		writel(0x0, t->reg + TAURUS_RNG_ST_RETURN);
 	}
 
@@ -168,8 +177,8 @@ static int taurus_trng_init(struct taurus_trng_ctrl *t)
 	u32 reg_v;
 
 	reg = devm_ioremap(dev, TAURUS_GLOBAL_CONFIG, 4);
-	if (IS_ERR(reg))
-		return PTR_ERR(reg);
+	if (!reg)
+		return -ENOMEM;
 
 	reg_v = readl(reg);
 	reg_v &= ~TAURUS_GLOBAL_CONFIG_TRNG_PD;
@@ -185,10 +194,18 @@ static int taurus_trng_init(struct taurus_trng_ctrl *t)
 
 static void taurus_trng_setup(struct taurus_trng_ctrl *t)
 {
-	t->ctrl_reg_v.wrd = readl(t->reg + TAURUS_RNG_CTRL);
+	unsigned long flags;
 
 	dev_info(t->dev, "Thor RNG setup with self test %s\n",
 		 t->is_self_test_en ? "enabled" : "disabled");
+	if (t->is_lfsr_bypass)
+		dev_info(t->dev, "Thor RNG setup with LFSR bypass\n");
+	if (t->is_corrector_bypass)
+		dev_info(t->dev, "Thor RNG setup with corrector bypass\n");
+
+	raw_spin_lock_irqsave(&t->lock, flags);
+	t->ctrl_reg_v.wrd = readl(t->reg + TAURUS_RNG_CTRL);
+
 	if (t->is_self_test_en) {
 		t->ctrl_reg_v.st_en = 0x1;
 		t->ctrl_reg_v.opt1 = 0x1;
@@ -197,23 +214,12 @@ static void taurus_trng_setup(struct taurus_trng_ctrl *t)
 		t->ctrl_reg_v.opt1 = 0x0;
 	}
 
-	if (t->is_lfsr_bypass) {
-		t->ctrl_reg_v.lfsr_bypass_1 = 0x1;
-		dev_info(t->dev, "Thor RNG setup with LFSR bypass\n");
-	} else {
-		t->ctrl_reg_v.lfsr_bypass_1 = 0x0;
-	}
-
-	if (t->is_corrector_bypass) {
-		t->ctrl_reg_v.corrector_bypass = 0x1;
-		dev_info(t->dev, "Thor RNG setup with corrector bypass\n");
-	} else {
-		t->ctrl_reg_v.corrector_bypass = 0x0;
-	}
+	t->ctrl_reg_v.lfsr_bypass_1 = t->is_lfsr_bypass ? 0x1 : 0x0;
+	t->ctrl_reg_v.corrector_bypass = t->is_corrector_bypass ? 0x1 : 0x0;
 
 	writel(t->ctrl_reg_v.wrd, t->reg + TAURUS_RNG_CTRL);
-
 	writel(0x0000000f, t->reg + TAURUS_RNG_INT_EN);
+	raw_spin_unlock_irqrestore(&t->lock, flags);
 }
 
 static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
@@ -320,6 +326,7 @@ static int taurus_trng_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	trng->dev = dev;
+	raw_spin_lock_init(&trng->lock);
 	atomic_set(&trng->in_reset, 0);
 
 	reg_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -334,21 +341,10 @@ static int taurus_trng_probe(struct platform_device *pdev)
 	if (trng->irq < 0)
 		return trng->irq;
 
-	ret = devm_request_irq(dev, trng->irq, taurus_trng_irq_handler,
-			       IRQF_NO_THREAD, "taurus-trng", trng);
-	if (ret)
-		return ret;
-
 	trng->is_self_test_en = of_property_read_bool(np, "self-test");
 	trng->is_lfsr_bypass = of_property_read_bool(np, "lfsr-bypass");
 	trng->is_corrector_bypass = of_property_read_bool(np,
 							  "corrector_bypass");
-
-	ret = devm_device_add_group(dev, &taurus_trng_attr_group);
-	if (ret) {
-		dev_err(dev, "failed to register sysfs\n");
-		return ret;
-	}
 
 	dev_set_drvdata(dev, trng);
 
@@ -358,27 +354,51 @@ static int taurus_trng_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	writel(0, trng->reg + TAURUS_RNG_INT_EN);
+	ret = devm_request_irq(dev, trng->irq, taurus_trng_irq_handler,
+			       IRQF_NO_THREAD, "taurus-trng", trng);
+	if (ret)
+		return ret;
+
 	taurus_trng_setup(trng);
 
+	ret = sysfs_create_group(&dev->kobj, &taurus_trng_attr_group);
+	if (ret) {
+		dev_err(dev, "failed to register sysfs\n");
+		goto err_irq;
+	}
+
 	taurus_trng_hwrng.priv = (unsigned long)trng;
-	ret = devm_hwrng_register(dev, &taurus_trng_hwrng);
+	ret = hwrng_register(&taurus_trng_hwrng);
 	if (ret) {
 		dev_err(dev, "hwrng registration failed\n");
-		return ret;
+		sysfs_remove_group(&dev->kobj, &taurus_trng_attr_group);
+		goto err_irq;
 	}
 	dev_info(dev, "hwrng registered\n");
 
 	return 0;
+
+err_irq:
+	writel(0, trng->reg + TAURUS_RNG_INT_EN);
+	devm_free_irq(dev, trng->irq, trng);
+	return ret;
 }
 
 static void taurus_trng_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct taurus_trng_ctrl *trng = dev_get_drvdata(dev);
 	void __iomem *reg;
 	u32 reg_v;
 
+	hwrng_unregister(&taurus_trng_hwrng);
+	sysfs_remove_group(&dev->kobj, &taurus_trng_attr_group);
+	writel(0, trng->reg + TAURUS_RNG_INT_EN);
+	devm_free_irq(dev, trng->irq, trng);
+
 	reg = devm_ioremap(dev, TAURUS_GLOBAL_CONFIG, 4);
-	if (IS_ERR(reg))
+	if (!reg)
 		return;
 
 	reg_v = readl(reg);

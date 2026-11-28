@@ -616,5 +616,6 @@ int rtl_te_hostpol_mib_clear(struct rtl_te_flow *te, u8 entry);
  * thresholds, attack types, and port masks.
  */
 int rtl_te_dos_set(struct rtl_te_flow *te, bool enable);
+void rtl_te_flow_debugfs_exit(struct rtl_te_flow *te);
 
 #endif /* RTL9617C_NI_TE_FLOW_H */

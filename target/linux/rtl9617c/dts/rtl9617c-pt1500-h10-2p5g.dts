@@ -302,7 +302,7 @@
 };
 
 &vsfc {
-	status = "okay";
+	status = "disabled";
 };
 
 &watchdog {

@@ -144,6 +144,7 @@ static void taurus_usb2_phy_port_cfg(struct taurus_usb2_phy *taurus_phy,
 				     u8 vstat_in_mask, u8 vctrl_mask,
 				     int port_id)
 {
+	unsigned long flags;
 	u32 offset = 0;
 	u32 reg_val = 0;
 	u8 vctrl_mask1, vctrl_mask2;
@@ -164,6 +165,7 @@ static void taurus_usb2_phy_port_cfg(struct taurus_usb2_phy *taurus_phy,
 	else
 		return;
 
+	spin_lock_irqsave(&taurus_phy->lock, flags);
 	writel(reg_val, taurus_phy->phy_regbase + offset);
 
 	reg_val &= ~USB2CFG_PHY_PORT_VLOADM;
@@ -181,6 +183,7 @@ static void taurus_usb2_phy_port_cfg(struct taurus_usb2_phy *taurus_phy,
 
 	reg_val |= USB2CFG_PHY_PORT_VLOADM;
 	writel(reg_val, taurus_phy->phy_regbase + offset);
+	spin_unlock_irqrestore(&taurus_phy->lock, flags);
 }
 
 static int taurus_usb2_phy_init(struct usb_phy *phy)
@@ -340,8 +343,12 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 
 	taurus_usb_phy->u2port0_vbus = devm_gpiod_get_optional(dev, "u2port0-vbus",
 							      GPIOD_OUT_HIGH);
-	if (IS_ERR(taurus_usb_phy->u2port0_vbus))
+	if (IS_ERR(taurus_usb_phy->u2port0_vbus)) {
+		if (PTR_ERR(taurus_usb_phy->u2port0_vbus) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		dev_info(dev, "USB2-port0 VBUS GPIO get failed, ignored\n");
+		taurus_usb_phy->u2port0_vbus = NULL;
+	}
 
 	driver_data = of_device_get_match_data(dev);
 	taurus_usb_phy->support_xtal_40 = (int)driver_data->support_xtal_40;
@@ -363,7 +370,7 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 	if (!phy_data)
 		return -ENOMEM;
 
-	taurus_usb_phy->usbcore_reset = of_reset_control_get(node,
+	taurus_usb_phy->usbcore_reset = devm_reset_control_get_exclusive(dev,
 							     "usbcore_reset");
 	if (IS_ERR(taurus_usb_phy->usbcore_reset)) {
 		ret = PTR_ERR(taurus_usb_phy->usbcore_reset);
@@ -371,7 +378,7 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	taurus_usb_phy->usb2port1_reset = of_reset_control_get(node,
+	taurus_usb_phy->usb2port1_reset = devm_reset_control_get_exclusive(dev,
 							       "usb2port1_reset");
 	if (IS_ERR(taurus_usb_phy->usb2port1_reset)) {
 		ret = PTR_ERR(taurus_usb_phy->usb2port1_reset);
@@ -395,6 +402,11 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 
 		if (1 << port_id & taurus_usb_phy->port_mask) {
 			phy_node = of_parse_phandle(node, "phy_sel", port_id);
+			if (!phy_node) {
+				dev_err(dev, "USB2 port%d missing phy_sel\n",
+					port_id);
+				return -ENODEV;
+			}
 			dev_info(dev, "USB2 port%d get %s\n", port_id,
 				 phy_node->name);
 
@@ -410,10 +422,11 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 								    val,
 								    sizeof(u8));
 
-			if (addr_size != data_size) {
+			if (addr_size <= 0 || addr_size != data_size) {
 				dev_err(dev,
 					"phy address size doesn't match data size (%d != %d)\n",
 					addr_size, data_size);
+				of_node_put(phy_node);
 				return -EINVAL;
 			}
 
@@ -421,24 +434,31 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 			phy_data->addr = devm_kzalloc(dev,
 						      sizeof(u8) * phy_data->size,
 						      GFP_KERNEL);
-			if (!phy_data->addr)
+			if (!phy_data->addr) {
+				of_node_put(phy_node);
 				return -ENOMEM;
+			}
 
 			phy_data->data = devm_kzalloc(dev,
 						      sizeof(u8) * phy_data->size,
 						      GFP_KERNEL);
-			if (!phy_data->data)
+			if (!phy_data->data) {
+				of_node_put(phy_node);
 				return -ENOMEM;
+			}
 
 			ret = of_property_read_u8_array(phy_node, addr,
 							phy_data->addr,
 							phy_data->size);
-			if (ret)
+			if (ret) {
+				of_node_put(phy_node);
 				goto err;
+			}
 
 			ret = of_property_read_u8_array(phy_node, val,
 							phy_data->data,
 							phy_data->size);
+			of_node_put(phy_node);
 			if (ret)
 				goto err;
 		}
@@ -446,11 +466,11 @@ static int taurus_usb2_phy_probe(struct platform_device *pdev)
 	}
 	platform_set_drvdata(pdev, taurus_usb_phy);
 
+	taurus_usb2_host_reset(taurus_usb_phy);
+
 	ret = usb_add_phy_dev(&taurus_usb_phy->phy);
 	if (ret)
 		goto err;
-
-	taurus_usb2_host_reset(taurus_usb_phy);
 
 err:
 	return ret;

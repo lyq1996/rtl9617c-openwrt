@@ -12,6 +12,8 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 
+#include <linux/soc/realtek/taurus-vsfc.h>
+
 #define TAURUS_VSFC_REG_GAINN		0x00
 #define TAURUS_VSFC_REG_GAINP		0x04
 #define TAURUS_VSFC_REG_CONTROL		0x08
@@ -49,7 +51,6 @@
 struct realtek_vsfc {
 	struct platform_device *pdev;
 	void __iomem *regs;
-	struct mutex lock; /* serializes sysfs enabled toggles */
 	u32 gainn;
 	u32 gainp;
 	u32 ctrl;
@@ -60,6 +61,9 @@ struct realtek_vsfc {
 	u32 recv_ctrl3;
 	u32 recv_ctrl4;
 };
+
+static DEFINE_MUTEX(taurus_vsfc_lock);
+static struct realtek_vsfc *glb_vsfc;
 
 static void taurus_vsfc_writel_2t(struct realtek_vsfc *vsfc, u32 off, u32 val)
 {
@@ -181,12 +185,12 @@ static ssize_t enabled_store(struct device *dev, struct device_attribute *attr,
 	if (ret)
 		return ret;
 
-	mutex_lock(&vsfc->lock);
+	mutex_lock(&taurus_vsfc_lock);
 	if (en)
 		taurus_vsfc_init(vsfc);
 	else
 		taurus_vsfc_disable(vsfc);
-	mutex_unlock(&vsfc->lock);
+	mutex_unlock(&taurus_vsfc_lock);
 
 	return count;
 }
@@ -240,7 +244,6 @@ static int taurus_vsfc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	vsfc->pdev = pdev;
-	mutex_init(&vsfc->lock);
 	platform_set_drvdata(pdev, vsfc);
 
 	vsfc->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -315,7 +318,10 @@ static int taurus_vsfc_probe(struct platform_device *pdev)
 	else
 		vsfc->gainp = value;
 
+	mutex_lock(&taurus_vsfc_lock);
 	ret = taurus_vsfc_init(vsfc);
+	glb_vsfc = vsfc;
+	mutex_unlock(&taurus_vsfc_lock);
 
 	dev_info(&pdev->dev, "RTK VSFC init (ctrl=0x%08x trig_ctrl=0x%08x)\n",
 		 readl(vsfc->regs + TAURUS_VSFC_REG_CONTROL),
@@ -323,6 +329,32 @@ static int taurus_vsfc_probe(struct platform_device *pdev)
 
 	return ret;
 }
+
+bool taurus_vsfc_quiesce(void)
+{
+	u32 ctrl;
+
+	mutex_lock(&taurus_vsfc_lock);
+	if (!glb_vsfc)
+		return false;
+
+	ctrl = readl(glb_vsfc->regs + TAURUS_VSFC_REG_CONTROL);
+	if (ctrl & TAURUS_VSFC_CTRL_GLB_EN) {
+		taurus_vsfc_disable(glb_vsfc);
+		return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(taurus_vsfc_quiesce);
+
+void taurus_vsfc_resume(bool was_enabled)
+{
+	if (was_enabled && glb_vsfc)
+		taurus_vsfc_init(glb_vsfc);
+	mutex_unlock(&taurus_vsfc_lock);
+}
+EXPORT_SYMBOL_GPL(taurus_vsfc_resume);
 
 static const struct of_device_id taurus_vsfc_of_match[] = {
 	{ .compatible = "realtek,taurus-vsfc", },
@@ -336,6 +368,7 @@ static struct platform_driver taurus_vsfc_driver = {
 		.name = "taurus-vsfc",
 		.of_match_table = taurus_vsfc_of_match,
 		.dev_groups = taurus_vsfc_groups,
+		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(taurus_vsfc_driver);

@@ -46,7 +46,7 @@ index 90737cb..044f03e 100644
  
  #include <linux/uaccess.h>
  
-@@ -608,9 +614,96 @@ static int pptp_ppp_ioctl(struct ppp_channel *chan, unsigned int cmd,
+@@ -608,9 +614,97 @@ static int pptp_ppp_ioctl(struct ppp_channel *chan, unsigned int cmd,
  	return err;
  }
  
@@ -73,10 +73,7 @@ index 90737cb..044f03e 100644
 +	if (!opt->src_addr.sin_addr.s_addr || !opt->dst_addr.sin_addr.s_addr)
 +		return -EINVAL;
 +
-+	rt = ip_route_output_ports(sock_net(sk), &fl4, sk,
-+				   opt->dst_addr.sin_addr.s_addr,
-+				   opt->src_addr.sin_addr.s_addr,
-+				   0, 0, IPPROTO_GRE, 0, 0);
++	rt = pptp_route_output(po, &fl4);
 +	if (IS_ERR(rt))
 +		return PTR_ERR(rt);
 +
@@ -94,6 +91,10 @@ index 90737cb..044f03e 100644
 +			return -EOPNOTSUPP;
 +		}
 +	} else {
++		if (dev->type != ARPHRD_ETHER || dev->addr_len != ETH_ALEN) {
++			ip_rt_put(rt);
++			return -EOPNOTSUPP;
++		}
 +		if (rt->rt_gw_family == AF_INET6) {
 +#if IS_ENABLED(CONFIG_IPV6)
 +			n = __ipv6_neigh_lookup_noref_stub(dev, &rt->rt_gw6);
@@ -224,8 +225,8 @@ index dc02f2b..0035b00 100644
  struct nf_flow_rule {
  	struct nf_flow_match	match;
  	struct flow_rule	*rule;
-+	u8			ppp_encap_tun[sizeof(struct ip_tunnel_info) +
-+					      sizeof(struct net_device_ppp_tunnel_opts)];
++	u8			ppp_encap_tun[sizeof(struct ip_tunnel_info) + sizeof(struct net_device_ppp_tunnel_opts)]
++				__aligned(__alignof__(struct ip_tunnel_info));
  };
  
  struct nf_flowtable_type {
@@ -285,7 +286,7 @@ index c67ba1e..c4ddfab 100644
  
  #include <asm/byteorder.h>
  #include <linux/atomic.h>
-@@ -123,8 +130,136 @@ struct pppol2tp_session {
+@@ -123,8 +130,140 @@ struct pppol2tp_session {
  
  static int pppol2tp_xmit(struct ppp_channel *chan, struct sk_buff *skb);
  
@@ -364,6 +365,10 @@ index c67ba1e..c4ddfab 100644
 +		goto out_put;
 +	}
 +	if (dev->type != ARPHRD_PPP) {
++		if (dev->type != ARPHRD_ETHER || dev->addr_len != ETH_ALEN) {
++			dst_release(dst);
++			goto out_put;
++		}
 +		if (rt->rt_gw_family == AF_INET6) {
 +#if IS_ENABLED(CONFIG_IPV6)
 +			n = __ipv6_neigh_lookup_noref_stub(dev, &rt->rt_gw6);

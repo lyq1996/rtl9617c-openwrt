@@ -1567,13 +1567,16 @@ static ssize_t rtl_fe_mcast_write(struct file *file, const char __user *ubuf,
 		if (rtl_fe_mcast_token(&cursor))
 			return -EINVAL;
 		ret = rtl_fe_mcast_alloc(fe, &mcgid);
+		mutex_lock(&m->lock);
 		if (!ret) {
 			snprintf(m->last, sizeof(m->last), "allocated MCGID %u",
 				 mcgid);
+			mutex_unlock(&m->lock);
 			dev_info(fe->dev, "mcast: allocated MCGID %u\n", mcgid);
 		} else {
 			snprintf(m->last, sizeof(m->last), "alloc failed: %d",
 				 ret);
+			mutex_unlock(&m->lock);
 		}
 		return ret ? ret : count;
 	}
@@ -1634,11 +1637,13 @@ static ssize_t rtl_fe_mcast_write(struct file *file, const char __user *ubuf,
 		return -EINVAL;
 	}
 
+	mutex_lock(&m->lock);
 	if (ret)
 		snprintf(m->last, sizeof(m->last), "%s %u failed: %d", cmd,
 			 mcgid, ret);
-	else
+	else if (!sysfs_streq(cmd, "get"))
 		snprintf(m->last, sizeof(m->last), "%s %u ok", cmd, mcgid);
+	mutex_unlock(&m->lock);
 	return ret ? ret : count;
 }
 

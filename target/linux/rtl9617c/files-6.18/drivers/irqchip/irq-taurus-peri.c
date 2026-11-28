@@ -10,8 +10,6 @@
 #define TAURUS_PERI_IRQ_STATUS	0x00
 #define TAURUS_PERI_IRQ_ENABLE	0x04
 
-static DEFINE_RAW_SPINLOCK(taurus_peri_irq_lock);
-
 static void taurus_peri_ictl_chain_handler(struct irq_desc *desc)
 {
 	struct irq_domain *d = irq_desc_get_handler_data(desc);
@@ -33,7 +31,7 @@ static void taurus_peri_ictl_chain_handler(struct irq_desc *desc)
 
 			if (virq)
 				generic_handle_irq(virq);
-			stat &= ~(1 << hwirq);
+			stat &= ~BIT(hwirq);
 		}
 	}
 
@@ -58,26 +56,10 @@ static irqreturn_t taurus_peri_ictl_handler(int irq, void *arg)
 
 			if (virq)
 				generic_handle_irq(virq);
-			stat &= ~(1 << hwirq);
+			stat &= ~BIT(hwirq);
 		}
 	}
 	return IRQ_HANDLED;
-}
-
-static int taurus_peri_irq_set_wake(struct irq_data *data, unsigned int on)
-{
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&taurus_peri_irq_lock, flags);
-	if (on)
-		irq_gc_mask_set_bit(data);
-	else
-		irq_gc_mask_clr_bit(data);
-	raw_spin_unlock_irqrestore(&taurus_peri_irq_lock, flags);
-#ifdef CONFIG_IRQ_DOMAIN_HIERARCHY
-	irq_chip_set_wake_parent(data, on);
-#endif
-	return 0;
 }
 
 static int __init taurus_peri_ictl_init(struct device_node *np,
@@ -126,6 +108,7 @@ static int __init taurus_peri_ictl_init(struct device_node *np,
 	gc = irq_get_domain_generic_chip(domain, 0);
 	gc->private = domain;
 	gc->reg_base = iobase;
+	gc->wake_enabled = IRQ_MSK(32);
 
 	gc->chip_types[0].regs.ack = TAURUS_PERI_IRQ_STATUS;
 	gc->chip_types[0].regs.mask = TAURUS_PERI_IRQ_ENABLE;
@@ -133,7 +116,7 @@ static int __init taurus_peri_ictl_init(struct device_node *np,
 	gc->chip_types[0].chip.irq_ack = irq_gc_ack_set_bit;
 	gc->chip_types[0].chip.irq_mask = irq_gc_mask_clr_bit;
 	gc->chip_types[0].chip.irq_unmask = irq_gc_mask_set_bit;
-	gc->chip_types[0].chip.irq_set_wake = taurus_peri_irq_set_wake;
+	gc->chip_types[0].chip.irq_set_wake = irq_gc_set_wake;
 
 	if (of_property_read_bool(np, "export-irq"))
 		ret = request_irq(irq, taurus_peri_ictl_handler, IRQF_NO_THREAD,

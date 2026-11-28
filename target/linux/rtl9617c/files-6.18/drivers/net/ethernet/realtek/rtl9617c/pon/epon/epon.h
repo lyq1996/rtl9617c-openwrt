@@ -154,7 +154,7 @@ int rtl_oam_stop(struct net_device *dev);
 extern const struct net_device_ops rtl_oam_ops;
 extern const struct net_device_ops rtl_data_ops;
 extern const struct attribute_group rtl_oam_group;
-extern struct rtl9617c_pon *rtl_oam_netlink_pon;
+extern struct rtl9617c_pon __rcu *rtl_oam_netlink_pon;
 int rtl_oam_open(struct net_device *dev);
 int rtl_oam_stop(struct net_device *dev);
 

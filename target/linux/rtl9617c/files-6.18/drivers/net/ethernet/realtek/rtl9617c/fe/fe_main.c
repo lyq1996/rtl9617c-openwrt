@@ -2894,7 +2894,8 @@ static int rtl_fe_flows_show(struct seq_file *s, void *unused)
 	list_for_each_entry(flow, &fe->flows, list) {
 		seq_printf(s, "%s cookie=%lx in=%s out=%s hash=%u counter=%u cos=%u cos_set=%u proto=%u packets=%u bytes=%llu learned=%u deleting=%u pol=%d host=%u",
 			   kind[flow->kind], flow->cookie,
-			   flow->input->netdev->name, flow->output->netdev->name,
+			   flow->input->retired ? "(retired)" : flow->input->netdev->name,
+			   flow->output->retired ? "(retired)" : flow->output->netdev->name,
 			   flow->hash_index, flow->counter, flow->cos,
 			   flow->cos_set, flow->protocol, flow->packets,
 			   flow->bytes, flow->learned, flow->deleting,
@@ -3214,17 +3215,6 @@ struct rtl_fe *rtl_fe_create(struct device *dev, struct regmap *regs,
 		rtl_fe_cpu_miss(defaults + i * 4);
 	dma_wmb();
 
-	fe->bridge = rtl_fe_bridge_start(fe);
-	if (IS_ERR(fe->bridge)) {
-		ret = PTR_ERR(fe->bridge);
-		goto free_memory;
-	}
-
-	fe->netdev_nb.notifier_call = rtl_fe_netdev_event;
-	ret = register_netdevice_notifier(&fe->netdev_nb);
-	if (ret)
-		goto stop_bridge;
-
 	rtl_fe_axi_reorder(fe);
 	/*
 	 * The multicast table manager is best effort: a hardware table that is
@@ -3244,12 +3234,28 @@ struct rtl_fe *rtl_fe_create(struct device *dev, struct regmap *regs,
 	ret = rtl_fe_napt6_init(fe);
 	if (ret)
 		dev_warn(dev, "NAPT6 manager unavailable: %d\n", ret);
+
+	fe->bridge = rtl_fe_bridge_start(fe);
+	if (IS_ERR(fe->bridge)) {
+		ret = PTR_ERR(fe->bridge);
+		fe->bridge = NULL;
+		goto exit_subsystems;
+	}
+
+	fe->netdev_nb.notifier_call = rtl_fe_netdev_event;
+	ret = register_netdevice_notifier(&fe->netdev_nb);
+	if (ret)
+		goto stop_bridge;
+
 	rtl_fe_debugfs_init(fe);
 	return fe;
 
 stop_bridge:
 	rtl_fe_bridge_stop(fe->bridge);
-free_memory:
+exit_subsystems:
+	rtl_fe_napt6_exit(fe);
+	rtl_fe_tunnel_exit(fe);
+	rtl_fe_mcast_exit(fe);
 	dma_free_coherent(dev, RTL_FE_MEMORY_BYTES, fe->memory, fe->dma);
 destroy_hash:
 	rhashtable_destroy(&fe->cookies);
@@ -3275,6 +3281,8 @@ void rtl_fe_destroy(struct rtl_fe *fe)
 	mutex_lock(&fe->lock);
 	rtl_fe_disable_locked(fe);
 	mutex_unlock(&fe->lock);
+	rtl_fe_napt6_exit(fe);
+	cancel_delayed_work_sync(&fe->cleanup_work);
 	if (fe->mirror_enabled) {
 		mutex_lock(&fe->lock);
 		fe->mirror_enabled = false;
@@ -3287,8 +3295,6 @@ void rtl_fe_destroy(struct rtl_fe *fe)
 	 */
 	rtl_fe_mcast_exit(fe);
 	rtl_fe_tunnel_exit(fe);
-	rtl_fe_napt6_exit(fe);
-	cancel_delayed_work_sync(&fe->cleanup_work);
 	list_for_each_entry_safe(flow, flow_next, &fe->flows, list) {
 		list_del_init(&flow->retry);
 		list_del_init(&flow->bridge_list);

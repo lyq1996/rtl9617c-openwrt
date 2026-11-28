@@ -412,7 +412,8 @@ int rtl_ni_tx_l4_parse_head(const u8 *data, unsigned int head_len,
 	case RTL_NI_ETH_P_IPV6: {
 		unsigned int payload_len;
 
-		if (head_len < off + RTL_NI_IPV6_HLEN)
+		if (head_len < off + RTL_NI_IPV6_HLEN ||
+		    len < off + RTL_NI_IPV6_HLEN)
 			return -EINVAL;
 		if ((data[off] >> 4) != 6)
 			return -EINVAL;
@@ -650,9 +651,13 @@ static int rtl_ni_tx_offload_encode(const u8 *head, unsigned int head_len,
 	if (!info.udp_csum_present)
 		return -EOPNOTSUPP;
 	/* Non-linear or non-writable UDP delegates to skb_checksum_help(). */
-	if (!writable || head_len < total_len || !linear_frame)
+	if (!writable)
 		return -EOPNOTSUPP;
-	rtl_ni_tx_udp_csum_fixup(linear_frame, &info);
+	if (linear_frame) {
+		if (head_len < total_len)
+			return -EOPNOTSUPP;
+		rtl_ni_tx_udp_csum_fixup(linear_frame, &info);
+	}
 	*para0 = bits | RTL_NI_LSO_PARA0_UDP_EN;
 	return 0;
 }
@@ -994,6 +999,76 @@ err_unmap:
 	return err;
 }
 
+/*
+ * Perform any skb mutation that may allocate or free skb fragments
+ * (skb_linearize / skb_checksum_help) BEFORE acquiring ring->lock with IRQs
+ * disabled, so __local_bh_enable_ip() and page_pool/conntrack destructors
+ * never execute under hard-IRQ-disabled spinlock.
+ */
+int rtl_ni_dma_prepare_skb(struct sk_buff *skb,
+			   const struct rtl9617c_ni_frame *frame,
+			   unsigned int mtu)
+{
+	unsigned int prefix = frame->prefix_length;
+	bool allow_sg = !frame->raw_payload && !prefix &&
+			skb->len >= DMA_MIN_FRAME && READ_ONCE(rtl_ni_tx_sg);
+	bool use_sg = allow_sg &&
+		      (skb_is_nonlinear(skb) || skb->len > RTL_NI_TX_COPYBREAK);
+	unsigned int max_len = allow_sg ? RTL_NI_TX_GSO_MAX_SG :
+					  (RTL_NI_DMA_BUF_SIZE - RTL_NI_DMA_HDR_LEN);
+	unsigned int len;
+
+	if (unlikely(skb_has_frag_list(skb))) {
+		if (skb_is_gso(skb) || skb_linearize(skb))
+			return -EMSGSIZE;
+		use_sg = allow_sg &&
+			 (skb_is_nonlinear(skb) || skb->len > RTL_NI_TX_COPYBREAK);
+	}
+
+	len = frame->raw_payload ? skb->len : max(skb->len, DMA_MIN_FRAME);
+	len += prefix;
+	if (len > max_len)
+		return -EMSGSIZE;
+	if (!use_sg && len + RTL_NI_DMA_HDR_LEN > RTL_NI_DMA_BUF_SIZE)
+		return -EMSGSIZE;
+
+	if (unlikely(!frame->raw_payload && !prefix &&
+		     (skb->ip_summed == CHECKSUM_PARTIAL || skb_is_gso(skb)))) {
+		bool gso = skb_is_gso(skb);
+		const struct rtl_ni_tx_offload req = {
+			.csum = rtl_ni_tx_csum || rtl_ni_tso,
+			.segment = gso,
+			.segment_ipv6 = rtl_ni_tso_v6,
+			.gso_size = gso ? skb_shinfo(skb)->gso_size : 0,
+			.mtu = mtu,
+		};
+		u32 para0 = 0;
+		int err;
+
+		if (use_sg) {
+			err = rtl_ni_tx_offload_prepare_sg(skb->data,
+							   skb_headlen(skb),
+							   skb->len, &req,
+							   &para0);
+		} else {
+			if (skb_is_nonlinear(skb) && skb_linearize(skb))
+				return -EMSGSIZE;
+			err = rtl_ni_tx_offload_encode(skb->data,
+						       skb_headlen(skb),
+						       skb->len, true, NULL,
+						       &req, &para0);
+		}
+		if (err) {
+			if (gso)
+				return -EOPNOTSUPP;
+			if (skb_checksum_help(skb))
+				return -EFAULT;
+		}
+	}
+
+	return 0;
+}
+
 int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 			 struct sk_buff *skb,
 			 const struct rtl9617c_ni_frame *frame,
@@ -1015,12 +1090,8 @@ int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 	*consumed = false;
 	*used_sg = false;
 
-	if (unlikely(skb_has_frag_list(skb))) {
-		if (skb_is_gso(skb) || skb_linearize(skb))
-			return -EMSGSIZE;
-		use_sg = allow_sg &&
-			 (skb_is_nonlinear(skb) || skb->len > RTL_NI_TX_COPYBREAK);
-	}
+	if (unlikely(skb_has_frag_list(skb)))
+		return -EMSGSIZE;
 
 	len = frame->raw_payload ? skb->len : max(skb->len, DMA_MIN_FRAME);
 	len += prefix;
@@ -1051,14 +1122,8 @@ int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 			if (rtl_ni_tx_offload_prepare_sg(skb->data,
 							 skb_headlen(skb),
 							 skb->len, &req,
-							 &lso_para0)) {
-				if (gso)
-					return -EOPNOTSUPP;
-				/* Non-linear or UDP CSUM_PARTIAL: let kernel compute. */
-				if (skb_checksum_help(skb))
-					return -EFAULT;
-				lso_para0 = 0;
-			}
+							 &lso_para0))
+				return -EOPNOTSUPP;
 		}
 
 		ret = rtl_ni_dma_ring_xmit_sg(dma, ring, skb, frame, mtu,
@@ -1102,15 +1167,8 @@ int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 		};
 
 		if (rtl_ni_tx_offload_prepare(buf + RTL_NI_DMA_HDR_LEN, len,
-					      &req, &lso_para0)) {
-			if (gso)
-				return -EOPNOTSUPP;
-			if (skb_checksum_help(skb))
-				return -EFAULT;
-			skb_copy_bits(skb, 0,
-				      buf + RTL_NI_DMA_HDR_LEN + prefix,
-				      skb->len);
-		}
+					      &req, &lso_para0))
+			return -EOPNOTSUPP;
 	}
 
 	/* An offloaded frame always carries an authoritative pkt_size. */

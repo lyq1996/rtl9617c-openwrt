@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/clk-provider.h>
 #include <linux/clk.h>
+#include <linux/cpuhplock.h>
+#include <linux/cpumask.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
+#include <linux/soc/realtek/taurus-vsfc.h>
+#include <linux/stop_machine.h>
+#include <asm/barrier.h>
 
 #define TAURUS_REG_GLOBAL_CONFIG	0x0c0
 #define TAURUS_REG_STRAP		0x0ac
@@ -50,11 +56,21 @@
  * CPLL_RSTB release and mux transitions across PVT corners before switching
  * the Cortex-A55 cluster back from F2C onto CPLL.
  */
-#define TAURUS_DELAY_PLL_FOR_LOCK	1000
+#define TAURUS_DELAY_PLL_FOR_LOCK	2000
 #define TAURUS_DELAY_PLL_FOR_SWITCH	20
 #define TAURUS_DELAY_PLL_FOR_RESET	10
 
-#define clk_mask(width)			((1 << (width)) - 1)
+static inline void taurus_clk_sync_barrier(void)
+{
+#ifdef CONFIG_ARM64
+	dsb(sy);
+	isb();
+#else
+	mb();
+#endif
+}
+
+#define clk_mask(width)			((1U << (width)) - 1)
 
 #define to_taurus_pll_clk(_hw)		container_of(_hw, struct taurus_pll_clk, hw)
 #define to_taurus_cpu_daemon(_hw)	container_of(_hw, struct taurus_cpu_daemon, hw)
@@ -117,6 +133,7 @@ struct taurus_cpu_daemon {
 	struct clk_hw hw;
 	struct clk *clks[TAURUS_CPUD_CLKS_NUM];
 	struct notifier_block reboot_nb;
+	unsigned long ref_rate;
 	unsigned long strap_rate;
 	bool rebooting;
 };
@@ -126,6 +143,7 @@ static struct taurus_cpu_daemon *taurus_cpu_clk_dev;
 static const struct taurus_pll_param taurus_pll_param_table[] = {
 	{ .pll = 40, .prediv = 5, .divn = 200, },
 	{ .pll = 44, .prediv = 5, .divn = 220, },
+	{ .pll = 46, .prediv = 5, .divn = 230, },
 	{ .pll = 48, .prediv = 5, .divn = 240, },
 	{ .pll = 50, .prediv = 5, .divn = 250, },
 	{ .pll = 56, .prediv = 3, .divn = 168, },
@@ -148,7 +166,8 @@ static const struct taurus_cpu_strap_speed taurus_cpu_strap_speed_table[] = {
 /*
  * Supported CPU rates for cpufreq/clk_set_rate. Includes 600 MHz (pll=48,
  * div=2) alongside 400 MHz (div=3) and 1200 MHz (div=1) so transitions across
- * 400/600/1200 MHz adjust only div_cortex without resetting CPLL.
+ * 400/600/1200 MHz adjust only div_cortex without resetting CPLL, plus
+ * 1150 MHz (pll=46, prediv=5, divn=230, div=1) for silicon binning/margin tests.
  */
 static const struct taurus_cpu_strap_speed taurus_cpu_rate_table[] = {
 	{ .pll = 48, .div = 3, },
@@ -159,6 +178,7 @@ static const struct taurus_cpu_strap_speed taurus_cpu_rate_table[] = {
 	{ .pll = 72, .div = 2, },
 	{ .pll = 40, .div = 1, },
 	{ .pll = 44, .div = 1, },
+	{ .pll = 46, .div = 1, },
 	{ .pll = 48, .div = 1, },
 };
 
@@ -236,7 +256,7 @@ static long taurus_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 	unsigned long mult;
 	int i;
 
-	if ((rate % (*parent_rate)) != 0)
+	if (!*parent_rate || (rate % (*parent_rate)) != 0)
 		goto not_support;
 
 	mult = rate / (*parent_rate);
@@ -259,7 +279,7 @@ static int taurus_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	u32 val, divn, prediv;
 	int i;
 
-	if ((rate % parent_rate) != 0)
+	if (!parent_rate || (rate % parent_rate) != 0)
 		return 0;
 
 	mult = rate / parent_rate;
@@ -272,7 +292,7 @@ static int taurus_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 			divn = taurus_pll_param_table[i].divn;
 		}
 	}
-	if (mult != (divn / prediv))
+	if (!prediv || mult != (divn / prediv))
 		return 0;
 
 	spin_lock_irqsave(pll_clk->lock, flags);
@@ -346,7 +366,7 @@ static int taurus_clk_divider(struct device_node *np, struct taurus_clk_reg *clk
 		return -EINVAL;
 	if (of_property_read_u8(np, "operate-width", &op_width))
 		return -EPERM;
-	if (op_width >= 32)
+	if (op_width < 2 || op_width >= 32 || op_shift + op_width > 32)
 		return -EINVAL;
 
 	parent_name = of_clk_get_parent_name(np, 0);
@@ -496,7 +516,7 @@ static unsigned long taurus_cpu_recalc_rate(struct clk_hw *hw,
 	if (div == 0)
 		div = 1;
 
-	ref_rate = clk_get_rate(cpud->clks[TAURUS_CPUD_REF]);
+	ref_rate = cpud->ref_rate;
 	result = (u64)ref_rate * (u64)mult;
 	do_div(result, prediv);
 	if (cplldiv & BIT(TAURUS_CPLLDIV_CF_SEL)) {
@@ -504,10 +524,112 @@ static unsigned long taurus_cpu_recalc_rate(struct clk_hw *hw,
 			   clk_mask(TAURUS_CPLLDIV_F2C_WIDTH)) >> 1;
 		if (f2c_div > 1)
 			do_div(result, f2c_div);
+	} else {
+		do_div(result, div);
 	}
-	do_div(result, div);
 
 	return (unsigned long)result;
+}
+
+struct taurus_cpu_switch_ctx {
+	struct taurus_cpu_daemon *cpud;
+	u32 div;
+	u32 last_cplldiv;
+};
+
+static int taurus_cpu_park_f2c_fn(void *data)
+{
+	struct taurus_cpu_switch_ctx *ctx = data;
+	struct taurus_cpu_daemon *cpud = ctx->cpud;
+	void __iomem *cplldiv_reg = cpud->reg + TAURUS_REG_CPLLDIV;
+	unsigned long flags;
+	u32 cplldiv;
+
+	spin_lock_irqsave(cpud->lock, flags);
+	cplldiv = readl(cplldiv_reg);
+	cplldiv |= BIT(TAURUS_CPLLDIV_CF_SEL);
+	writel(cplldiv, cplldiv_reg);
+	cplldiv = readl(cplldiv_reg);
+	taurus_clk_sync_barrier();
+	spin_unlock_irqrestore(cpud->lock, flags);
+
+	ctx->last_cplldiv = cplldiv;
+	if (!(cplldiv & BIT(TAURUS_CPLLDIV_CF_SEL)))
+		return -EIO;
+
+	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
+	taurus_clk_sync_barrier();
+	return 0;
+}
+
+static int taurus_cpu_latch_and_return_cpll_fn(void *data)
+{
+	struct taurus_cpu_switch_ctx *ctx = data;
+	struct taurus_cpu_daemon *cpud = ctx->cpud;
+	void __iomem *cplldiv_reg = cpud->reg + TAURUS_REG_CPLLDIV;
+	unsigned long flags;
+	u32 cplldiv;
+
+	spin_lock_irqsave(cpud->lock, flags);
+	cplldiv = readl(cplldiv_reg);
+	cplldiv &= ~clk_mask(TAURUS_CPLLDIV_CORTEX_WIDTH);
+	cplldiv |= (ctx->div << 1);
+	cplldiv |= BIT(TAURUS_CPLLDIV_OVERRIDE) | BIT(TAURUS_CPLLDIV_MODE_OVERRIDE);
+	writel(cplldiv, cplldiv_reg);
+	readl(cplldiv_reg);
+	taurus_clk_sync_barrier();
+	spin_unlock_irqrestore(cpud->lock, flags);
+
+	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
+
+	spin_lock_irqsave(cpud->lock, flags);
+	cplldiv = readl(cplldiv_reg);
+	cplldiv &= ~BIT(TAURUS_CPLLDIV_CF_SEL);
+	writel(cplldiv, cplldiv_reg);
+	cplldiv = readl(cplldiv_reg);
+	taurus_clk_sync_barrier();
+	spin_unlock_irqrestore(cpud->lock, flags);
+
+	ctx->last_cplldiv = cplldiv;
+	if (cplldiv & BIT(TAURUS_CPLLDIV_CF_SEL))
+		return -EIO;
+
+	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
+	taurus_clk_sync_barrier();
+	return 0;
+}
+
+static int taurus_cpu_div_only_switch_fn(void *data)
+{
+	int ret;
+
+	ret = taurus_cpu_park_f2c_fn(data);
+	if (ret)
+		return ret;
+
+	return taurus_cpu_latch_and_return_cpll_fn(data);
+}
+
+static int taurus_cpu_run_quiesced(struct taurus_cpu_daemon *cpud,
+				   cpu_stop_fn_t fn,
+				   struct taurus_cpu_switch_ctx *ctx)
+{
+	int ret;
+
+	/*
+	 * Quiesce sibling Cortex-A55 cores across asynchronous CF_SEL mux and
+	 * div_cortex register writes so no core executes instructions or cache
+	 * transactions on a transitioning shared cluster clock.
+	 * Use cpus_read_trylock() to avoid deadlocking if called from CPU hotplug.
+	 */
+	if (system_state == SYSTEM_RUNNING && !cpud->rebooting &&
+	    num_online_cpus() > 1 && cpus_read_trylock()) {
+		ret = stop_machine_cpuslocked(fn, ctx, NULL);
+		cpus_read_unlock();
+		return ret;
+	}
+
+	return fn(ctx);
 }
 
 static long taurus_cpu_round_rate(struct clk_hw *hw, unsigned long rate,
@@ -518,7 +640,7 @@ static long taurus_cpu_round_rate(struct clk_hw *hw, unsigned long rate,
 	u32 mult, div;
 	int i;
 
-	ref_rate = clk_get_rate(cpud->clks[TAURUS_CPUD_REF]);
+	ref_rate = cpud->ref_rate;
 	for (i = 0; i < ARRAY_SIZE(taurus_cpu_rate_table); i++) {
 		mult = taurus_cpu_rate_table[i].pll;
 		div = taurus_cpu_rate_table[i].div;
@@ -543,7 +665,7 @@ static int taurus_cpu_apply_rate_locked(struct taurus_cpu_daemon *cpud,
 	bool need_pll_reprog;
 	int i;
 
-	ref_rate = clk_get_rate(cpud->clks[TAURUS_CPUD_REF]);
+	ref_rate = cpud->ref_rate;
 	for (i = 0; i < ARRAY_SIZE(taurus_cpu_rate_table); i++) {
 		u32 t_mult = taurus_cpu_rate_table[i].pll;
 		u32 t_div = taurus_cpu_rate_table[i].div;
@@ -601,90 +723,96 @@ static int taurus_cpu_apply_rate_locked(struct taurus_cpu_daemon *cpud,
 	if (!((fpll0 >> TAURUS_CPLL_RSTB_SHIFT) & clk_mask(TAURUS_CPLL_RSTB_WIDTH)))
 		return -EIO;
 
-	/* Step 1: Switch CPU mux to F2C (FPLL) and wait for glitch-free switch. */
-	spin_lock_irqsave(cpud->lock, flags);
-	cplldiv = readl(cplldiv_reg);
-	cplldiv |= BIT(TAURUS_CPLLDIV_CF_SEL);
-	writel(cplldiv, cplldiv_reg);
-	cplldiv = readl(cplldiv_reg);
-	spin_unlock_irqrestore(cpud->lock, flags);
+	{
+		struct taurus_cpu_switch_ctx sw = {
+			.cpud = cpud,
+			.div = div,
+			.last_cplldiv = cplldiv,
+		};
+		bool vsfc_was_on = taurus_vsfc_quiesce();
+		int ret = 0;
 
-	if (!(cplldiv & BIT(TAURUS_CPLLDIV_CF_SEL))) {
-		pr_err("taurus-clk: failed to park CPU mux on F2C (cplldiv=0x%08x)\n",
-		       cplldiv);
-		return -EIO;
-	}
-	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
+		if (!need_pll_reprog) {
+			/* Fast divider-only path (~60 us) under SMP quiesce. */
+			ret = taurus_cpu_run_quiesced(cpud,
+						      taurus_cpu_div_only_switch_fn,
+						      &sw);
+			if (ret) {
+				pr_err("taurus-clk: divider-only switch failed (cplldiv=0x%08x)\n",
+				       sw.last_cplldiv);
+				goto out_resume_vsfc;
+			}
+		} else {
+			/* Step 1: Quiesce all cores and park CPU mux onto F2C (FPLL). */
+			ret = taurus_cpu_run_quiesced(cpud,
+						      taurus_cpu_park_f2c_fn,
+						      &sw);
+			if (ret) {
+				pr_err("taurus-clk: failed to park CPU mux on F2C (cplldiv=0x%08x)\n",
+				       sw.last_cplldiv);
+				goto out_resume_vsfc;
+			}
 
-	/* Step 2: Reprogram CPLL only when VCO/divider parameters actually change. */
-	if (need_pll_reprog) {
-		spin_lock_irqsave(cpud->lock, flags);
-		cpll0 = readl(cpll0_reg);
-		cpll0 &= ~(clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT);
-		writel(cpll0, cpll0_reg);
-		cpll0 = readl(cpll0_reg);
-		spin_unlock_irqrestore(cpud->lock, flags);
+			/* Step 2: Reprogram CPLL safely while running from F2C. */
+			spin_lock_irqsave(cpud->lock, flags);
+			cpll0 = readl(cpll0_reg);
+			cpll0 &= ~(clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT);
+			writel(cpll0, cpll0_reg);
+			cpll0 = readl(cpll0_reg);
+			spin_unlock_irqrestore(cpud->lock, flags);
 
-		if (cpll0 & (clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT)) {
-			pr_err("taurus-clk: failed to assert CPLL_RSTB (cpll0=0x%08x)\n",
-			       cpll0);
-			return -EIO;
+			if (cpll0 & (clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT)) {
+				pr_err("taurus-clk: failed to assert CPLL_RSTB (cpll0=0x%08x)\n",
+				       cpll0);
+				ret = -EIO;
+				goto out_resume_vsfc;
+			}
+			udelay(TAURUS_DELAY_PLL_FOR_RESET);
+
+			spin_lock_irqsave(cpud->lock, flags);
+			cpll0 = readl(cpll0_reg);
+			cpll0 &= ~(clk_mask(TAURUS_DIVN_WIDTH) << TAURUS_DIVN_SHIFT);
+			cpll0 |= (divn - TAURUS_DIVN_BASE) << TAURUS_DIVN_SHIFT;
+			cpll0 &= ~(clk_mask(TAURUS_PREDIV_WIDTH) << TAURUS_PREDIV_SHIFT);
+			cpll0 |= (prediv - TAURUS_PREDIV_BASE) << TAURUS_PREDIV_SHIFT;
+			writel(cpll0, cpll0_reg);
+			readl(cpll0_reg);
+
+			cplldiv = readl(cplldiv_reg);
+			cplldiv |= BIT(TAURUS_CPLLDIV_MODE_OVERRIDE);
+			writel(cplldiv, cplldiv_reg);
+			readl(cplldiv_reg);
+
+			cpll0 = readl(cpll0_reg);
+			cpll0 &= ~(clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT);
+			cpll0 |= BIT(TAURUS_CPLL_RSTB_SHIFT);
+			writel(cpll0, cpll0_reg);
+			readl(cpll0_reg);
+			spin_unlock_irqrestore(cpud->lock, flags);
+
+			if (cpud->rebooting || system_state != SYSTEM_RUNNING)
+				udelay(TAURUS_DELAY_PLL_FOR_LOCK);
+			else
+				usleep_range(TAURUS_DELAY_PLL_FOR_LOCK,
+					     TAURUS_DELAY_PLL_FOR_LOCK + 500);
+
+			/* Step 3+4: Quiesce all cores, latch divider, switch mux back to CPLL. */
+			ret = taurus_cpu_run_quiesced(cpud,
+						      taurus_cpu_latch_and_return_cpll_fn,
+						      &sw);
+			if (ret) {
+				pr_err("taurus-clk: failed to switch CPU mux back to CPLL (cplldiv=0x%08x)\n",
+				       sw.last_cplldiv);
+				goto out_resume_vsfc;
+			}
 		}
-		udelay(TAURUS_DELAY_PLL_FOR_RESET);
 
-		spin_lock_irqsave(cpud->lock, flags);
-		cpll0 = readl(cpll0_reg);
-		cpll0 &= ~(clk_mask(TAURUS_DIVN_WIDTH) << TAURUS_DIVN_SHIFT);
-		cpll0 |= (divn - TAURUS_DIVN_BASE) << TAURUS_DIVN_SHIFT;
-		cpll0 &= ~(clk_mask(TAURUS_PREDIV_WIDTH) << TAURUS_PREDIV_SHIFT);
-		cpll0 |= (prediv - TAURUS_PREDIV_BASE) << TAURUS_PREDIV_SHIFT;
-		writel(cpll0, cpll0_reg);
-		readl(cpll0_reg);
+		pr_debug("taurus-clk: change CPU frequency to %lu MHz\n", rate / 1000000);
 
-		cplldiv = readl(cplldiv_reg);
-		cplldiv |= BIT(TAURUS_CPLLDIV_MODE_OVERRIDE);
-		writel(cplldiv, cplldiv_reg);
-		readl(cplldiv_reg);
-
-		cpll0 = readl(cpll0_reg);
-		cpll0 &= ~(clk_mask(TAURUS_CPLL_RSTB_WIDTH) << TAURUS_CPLL_RSTB_SHIFT);
-		cpll0 |= BIT(TAURUS_CPLL_RSTB_SHIFT);
-		writel(cpll0, cpll0_reg);
-		readl(cpll0_reg);
-		spin_unlock_irqrestore(cpud->lock, flags);
-
-		udelay(TAURUS_DELAY_PLL_FOR_LOCK);
+out_resume_vsfc:
+		taurus_vsfc_resume(vsfc_was_on);
+		return ret;
 	}
-
-	/* Step 3: Latch the new Cortex divider while still safely clocked by F2C. */
-	spin_lock_irqsave(cpud->lock, flags);
-	cplldiv = readl(cplldiv_reg);
-	cplldiv &= ~clk_mask(TAURUS_CPLLDIV_CORTEX_WIDTH);
-	cplldiv |= (div << 1);
-	cplldiv |= BIT(TAURUS_CPLLDIV_OVERRIDE) | BIT(TAURUS_CPLLDIV_MODE_OVERRIDE);
-	writel(cplldiv, cplldiv_reg);
-	readl(cplldiv_reg);
-	spin_unlock_irqrestore(cpud->lock, flags);
-
-	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
-
-	/* Step 4: Switch CPU mux back to the locked CPLL and allow mux settle. */
-	spin_lock_irqsave(cpud->lock, flags);
-	cplldiv = readl(cplldiv_reg);
-	cplldiv &= ~BIT(TAURUS_CPLLDIV_CF_SEL);
-	writel(cplldiv, cplldiv_reg);
-	cplldiv = readl(cplldiv_reg);
-	spin_unlock_irqrestore(cpud->lock, flags);
-
-	if (cplldiv & BIT(TAURUS_CPLLDIV_CF_SEL)) {
-		pr_err("taurus-clk: failed to switch CPU mux back to CPLL (cplldiv=0x%08x)\n",
-		       cplldiv);
-		return -EIO;
-	}
-	udelay(TAURUS_DELAY_PLL_FOR_SWITCH);
-
-	pr_debug("taurus-clk: change CPU frequency to %lu MHz\n", rate / 1000000);
-	return 0;
 }
 
 static int taurus_cpu_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -774,6 +902,7 @@ static int taurus_clk_cpu_daemon(struct device_node *np,
 	}
 
 	ref_rate = clk_get_rate(cpud->clks[TAURUS_CPUD_REF]);
+	cpud->ref_rate = ref_rate;
 	min_rate = ref_rate * taurus_cpu_strap_speed_table[0].pll /
 		   taurus_cpu_strap_speed_table[0].div;
 	max_rate = ref_rate * taurus_cpu_strap_speed_table[7].pll /
