@@ -99,6 +99,7 @@ struct rtl_ni_dma_ring {
 	unsigned int tail;
 	unsigned int zc_in_flight;
 	unsigned int zc_skbs;
+	bool idle_drain_armed;
 	bool stopped;
 };
 
@@ -351,6 +352,8 @@ int rtl_ni_dma_start(struct rtl_ni_dma *dma);
 void rtl_ni_dma_stop(struct rtl_ni_dma *dma);
 void rtl_ni_dma_ring_reclaim(struct rtl_ni_dma *dma,
 			     struct rtl_ni_dma_ring *ring);
+bool rtl_ni_dma_ring_reclaim_timer(struct rtl_ni_dma *dma,
+				   struct rtl_ni_dma_ring *ring);
 bool rtl_ni_dma_ring_avail(const struct rtl_ni_dma_ring *ring,
 			   unsigned int needed);
 int rtl_ni_dma_prepare_skb(struct sk_buff *skb,

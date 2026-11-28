@@ -716,6 +716,7 @@ static void rtl_ni_dma_ring_drain(struct rtl_ni_dma *dma,
 	}
 	ring->zc_in_flight = 0;
 	ring->zc_skbs = 0;
+	ring->idle_drain_armed = false;
 	ring->head = 0;
 	ring->tail = 0;
 	ring->stopped = false;
@@ -772,6 +773,7 @@ static int rtl_ni_dma_ring_start(struct rtl_ni_dma *dma,
 	ring->tail = 0;
 	ring->zc_in_flight = 0;
 	ring->zc_skbs = 0;
+	ring->idle_drain_armed = false;
 	ring->stopped = false;
 
 	writel(lower_32_bits(ring->desc_dma) | RTL_NI_DMA_ORDER,
@@ -845,13 +847,11 @@ void rtl_ni_dma_stop(struct rtl_ni_dma *dma)
 		rtl_ni_dma_ring_drain(dma, &dma->rings[i]);
 }
 
-void rtl_ni_dma_ring_reclaim(struct rtl_ni_dma *dma,
-			     struct rtl_ni_dma_ring *ring)
+static void rtl_ni_dma_ring_reclaim_hw(struct rtl_ni_dma *dma,
+				       struct rtl_ni_dma_ring *ring,
+				       unsigned int hw, unsigned int guard)
 {
-	unsigned int hw = readl(rtl_ni_dma_vp(dma, ring) + DMA_VP_READ) &
-			  RTL_NI_DMA_MASK;
-
-	while (((hw - ring->tail) & RTL_NI_DMA_MASK) > RTL_NI_DMA_GUARD) {
+	while (((hw - ring->tail) & RTL_NI_DMA_MASK) > guard) {
 		struct rtl_ni_tx_slot *slot = &ring->slots[ring->tail];
 
 		if (slot->map_type != RTL_NI_TX_MAP_NONE)
@@ -861,6 +861,50 @@ void rtl_ni_dma_ring_reclaim(struct rtl_ni_dma *dma,
 		rtl_ni_tx_slot_unmap(dma->dev, slot);
 		ring->tail = (ring->tail + 1) & RTL_NI_DMA_MASK;
 	}
+}
+
+void rtl_ni_dma_ring_reclaim(struct rtl_ni_dma *dma,
+			     struct rtl_ni_dma_ring *ring)
+{
+	unsigned int hw = readl(rtl_ni_dma_vp(dma, ring) + DMA_VP_READ) &
+			  RTL_NI_DMA_MASK;
+
+	rtl_ni_dma_ring_reclaim_hw(dma, ring, hw, RTL_NI_DMA_GUARD);
+}
+
+bool rtl_ni_dma_ring_reclaim_timer(struct rtl_ni_dma *dma,
+				   struct rtl_ni_dma_ring *ring)
+{
+	unsigned int hw = readl(rtl_ni_dma_vp(dma, ring) + DMA_VP_READ) &
+			  RTL_NI_DMA_MASK;
+
+	rtl_ni_dma_ring_reclaim_hw(dma, ring, hw, RTL_NI_DMA_GUARD);
+	if (!ring->zc_skbs) {
+		ring->idle_drain_armed = false;
+		return false;
+	}
+
+	/*
+	 * DMA_VP_READ advances on descriptor fetch, so the fast path retains
+	 * RTL_NI_DMA_GUARD trailing descriptors.  Once the ring is idle
+	 * (hw == ring->head), wait one full timer tick (1 ms) with no new TX
+	 * submissions before draining the remaining <= RTL_NI_DMA_GUARD slots
+	 * so the final zero-copy skbs are freed and rtl_ni_timer stops instead
+	 * of spinning indefinitely at 1 kHz.
+	 */
+	if (hw != ring->head) {
+		ring->idle_drain_armed = false;
+		return true;
+	}
+
+	if (!ring->idle_drain_armed) {
+		ring->idle_drain_armed = true;
+		return true;
+	}
+
+	rtl_ni_dma_ring_reclaim_hw(dma, ring, hw, 0);
+	ring->idle_drain_armed = false;
+	return ring->zc_skbs != 0;
 }
 
 bool rtl_ni_dma_ring_avail(const struct rtl_ni_dma_ring *ring,
@@ -980,6 +1024,7 @@ static int rtl_ni_dma_ring_xmit_sg(struct rtl_ni_dma *dma,
 		idx = (idx + 1) & RTL_NI_DMA_MASK;
 	}
 	ring->zc_skbs++;
+	ring->idle_drain_armed = false;
 
 	dma_wmb();
 	ring->head = idx;
@@ -1184,6 +1229,7 @@ int rtl_ni_dma_ring_xmit(struct rtl_ni_dma *dma, struct rtl_ni_dma_ring *ring,
 						 DMA_DESC_CTRL) |
 						((len + RTL_NI_DMA_HDR_LEN) <<
 						 DMA_DESC_LEN_SHIFT));
+	ring->idle_drain_armed = false;
 	dma_wmb();
 	ring->head = (ring->head + 1) & RTL_NI_DMA_MASK;
 	writel(ring->head, rtl_ni_dma_vp(dma, ring) + DMA_VP_WRITE);

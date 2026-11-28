@@ -189,14 +189,16 @@ static enum hrtimer_restart rtl_ni_timer(struct hrtimer *timer)
 
 		spin_lock_irqsave(&ring->lock, flags);
 		if (ring->stopped || ring->zc_skbs) {
-			rtl_ni_dma_ring_reclaim(&ni->dma, ring);
+			bool zc_pending = rtl_ni_dma_ring_reclaim_timer(&ni->dma,
+									ring);
+
 			if (ring->stopped) {
 				if (rtl_ni_dma_ring_avail(ring, 1))
 					rtl_ni_wake_ring(ni, ring);
 				else
 					need_restart = true;
 			}
-			if (ring->zc_skbs)
+			if (zc_pending)
 				need_restart = true;
 		}
 		spin_unlock_irqrestore(&ring->lock, flags);
